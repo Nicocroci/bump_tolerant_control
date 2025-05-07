@@ -1,0 +1,6 @@
+build/
+devel/
+logs/
+*.pyc
+__pychace__/
+*.swp

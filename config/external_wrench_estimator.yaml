@@ -1,0 +1,30 @@
+#UAV name
+uav_name: "uav1"
+
+#Allocation matrix for the wrench estimator
+allocation_matrix: [
+  -0.707, 0.707, 0.707, -0.707, 0.707, -0.707, -0.707, 0.707,
+  -0.707, 0.707, -0.707, 0.707, 0.707, -0.707, 0.707, -0.707,
+  -1, -1, 1, 1, 1, 1, -1, -1,
+  1, 1, 1, 1, 1, 1, 1, 1
+]
+
+#Rate of the wrench estimator
+rate:
+  compute_wrench: 20 # [Hz]
+
+#Mass of the UAV
+mass : 7.5 # [kg]
+
+#Inertia of the UAV
+inertia: [0.1827, 0, 0, 0, 0.1827, 0, 0, 0, 0.3154] # [kg*m^2]
+
+#Gravity
+gravity: [0, 0, 9.81] # [m/s^2]
+
+#Thresholds for the wrench estimator
+force_threshold: 10    # [N]
+moment_threshold: 0.2  # [Nm]
+
+#Drone radius
+drone_radius : 0.47 # [m]

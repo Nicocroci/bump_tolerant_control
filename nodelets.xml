@@ -1,0 +1,10 @@
+<library path="lib/libBumpTolerantControl">
+  <class name="bump_tolerant_control/BumpTolerantControl" type="bump_tolerant_control::BumpTolerantControl" base_class_type="nodelet::Nodelet">
+    <description>BumpTolerantControl nodelet</description>
+  </class>
+</library>
+<library path="lib/libExternalWrenchEstimator">
+  <class name="external_wrench_estimator/ExternalWrenchEstimator" type="external_wrench_estimator::ExternalWrenchEstimator" base_class_type="nodelet::Nodelet">
+    <description>Nodelet for external wrench estimation</description>
+  </class>
+</library>
