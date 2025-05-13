@@ -54,7 +54,8 @@ windows:
   - plot:
       layout: tiled
       panes:
-      - 'waitForControl; rqt_plot /external_wrench_estimator/force_norms/data[0] /external_wrench_estimator/force_norms/data[1] /external_wrench_estimator/force_norms/data[2]'
+        - 'waitForControl; rqt_plot /external_wrench_estimator/force_norms/data[0] /external_wrench_estimator/force_norms/data[1] /external_wrench_estimator/force_norms/data[2] /external_wrench_estimator/force_norms/data[3] /external_wrench_estimator/force_norms/data[4] /external_wrench_estimator/force_norms/data[5] /external_wrench_estimator/force_norms/data[6] /external_wrench_estimator/force_norms/data[7] /external_wrench_estimator/force_norms/data[8]'
+        - 'waitForControl; rqt_plot /external_wrench_estimator/force_norms/data[9] /external_wrench_estimator/force_norms/data[10] /external_wrench_estimator/force_norms/data[11] /external_wrench_estimator/force_norms/data[12] /external_wrench_estimator/force_norms/data[13] /external_wrench_estimator/force_norms/data[14] /external_wrench_estimator/force_norms/data[15] /external_wrench_estimator/force_norms/data[16] /external_wrench_estimator/force_norms/data[17]'
   - rviz:
       layout: tiled
       panes:

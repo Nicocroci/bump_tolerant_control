@@ -92,6 +92,7 @@ private:
 
   ros::Publisher pub_wrench_;
   ros::Publisher pub_collision_marker_;
+  ros::Publisher pub_filt_norm_;
 
   ros::Timer timer_compute_wrench_;
 
@@ -166,6 +167,7 @@ void ExternalWrenchEstimator::onInit() {
 
   pub_wrench_ = nh.advertise<std_msgs::Float64MultiArray>("external_wrench_estimation_out", 1);
   pub_collision_marker_ = nh.advertise<visualization_msgs::Marker>("collision_point_marker", 1);
+  pub_filt_norm_ = nh.advertise<std_msgs::Float64MultiArray>("/external_wrench_estimator/force_norms", 1);
 
   timer_compute_wrench_ = nh.createTimer(ros::Rate(rate_compute_wrench_),&ExternalWrenchEstimator::timerComputeWrench,this);
 
@@ -222,10 +224,29 @@ void ExternalWrenchEstimator::timerComputeWrench(const ros::TimerEvent& te) {
   Eigen::Vector3d f = mass_ * a_corrected;
   f_ext_hat_ += K_I_f_ * (f - f_ext_hat_) * dt;
 
-  // --- Filtri passa-basso e passa-alto sulla forza stimata ---
-  double alpha_lp = 0.95;
-  f_ext_hat_lp_ = alpha_lp * f_ext_hat_lp_ + (1.0 - alpha_lp) * f_ext_hat_;
-  f_ext_hat_hp_ = f_ext_hat_ - f_ext_hat_lp_;
+  // --- HP Filters with different alpha values ---
+  double alpha_lp_1 = 0.95;
+  double alpha_lp_2 = 0.9;
+  double alpha_lp_3 = 0.8;
+  double alpha_lp_4 = 0.7;
+
+  // Static variables for each filter
+  static Eigen::Vector3d f_ext_hat_lp_1 = Eigen::Vector3d::Zero();
+  static Eigen::Vector3d f_ext_hat_lp_2 = Eigen::Vector3d::Zero();
+  static Eigen::Vector3d f_ext_hat_lp_3 = Eigen::Vector3d::Zero();
+  static Eigen::Vector3d f_ext_hat_lp_4 = Eigen::Vector3d::Zero();
+
+  // Low-pass filters (exponential moving average)
+  f_ext_hat_lp_1 = alpha_lp_1 * f_ext_hat_lp_1 + (1.0 - alpha_lp_1) * f_ext_hat_;
+  f_ext_hat_lp_2 = alpha_lp_2 * f_ext_hat_lp_2 + (1.0 - alpha_lp_2) * f_ext_hat_;
+  f_ext_hat_lp_3 = alpha_lp_3 * f_ext_hat_lp_3 + (1.0 - alpha_lp_3) * f_ext_hat_;
+  f_ext_hat_lp_4 = alpha_lp_4 * f_ext_hat_lp_4 + (1.0 - alpha_lp_4) * f_ext_hat_;
+
+  // High-pass filters (difference between signal and low-pass)
+  Eigen::Vector3d f_ext_hat_hp_1 = f_ext_hat_ - f_ext_hat_lp_1;
+  Eigen::Vector3d f_ext_hat_hp_2 = f_ext_hat_ - f_ext_hat_lp_2;
+  Eigen::Vector3d f_ext_hat_hp_3 = f_ext_hat_ - f_ext_hat_lp_3;
+  Eigen::Vector3d f_ext_hat_hp_4 = f_ext_hat_ - f_ext_hat_lp_4;
 
   // --- Moment estimation (momentum-based) ---
   Eigen::Vector3d p_omega = inertia_ * w;
@@ -235,19 +256,51 @@ void ExternalWrenchEstimator::timerComputeWrench(const ros::TimerEvent& te) {
   Eigen::Vector3d m_total = m + mg + p_omega.cross(w);
   Eigen::Vector3d m_error = p_omega_dot - m_total - m_ext_hat_;
   m_ext_hat_ += K_I_m_ * m_error * dt;
+
+  // Moment filters (same alphas as force)
+  static Eigen::Vector3d m_ext_hat_lp_1 = Eigen::Vector3d::Zero();
+  static Eigen::Vector3d m_ext_hat_lp_2 = Eigen::Vector3d::Zero();
+  static Eigen::Vector3d m_ext_hat_lp_3 = Eigen::Vector3d::Zero();
+  static Eigen::Vector3d m_ext_hat_lp_4 = Eigen::Vector3d::Zero();
+
+  m_ext_hat_lp_1 = alpha_lp_1 * m_ext_hat_lp_1 + (1.0 - alpha_lp_1) * m_ext_hat_;
+  m_ext_hat_lp_2 = alpha_lp_2 * m_ext_hat_lp_2 + (1.0 - alpha_lp_2) * m_ext_hat_;
+  m_ext_hat_lp_3 = alpha_lp_3 * m_ext_hat_lp_3 + (1.0 - alpha_lp_3) * m_ext_hat_;
+  m_ext_hat_lp_4 = alpha_lp_4 * m_ext_hat_lp_4 + (1.0 - alpha_lp_4) * m_ext_hat_;
+
+  Eigen::Vector3d m_ext_hat_hp_1 = m_ext_hat_ - m_ext_hat_lp_1;
+  Eigen::Vector3d m_ext_hat_hp_2 = m_ext_hat_ - m_ext_hat_lp_2;
+  Eigen::Vector3d m_ext_hat_hp_3 = m_ext_hat_ - m_ext_hat_lp_3;
+  Eigen::Vector3d m_ext_hat_hp_4 = m_ext_hat_ - m_ext_hat_lp_4;
+
+  // Publish all force and moment norms for plotting
+  std_msgs::Float64MultiArray norm_msg;
+  norm_msg.data.resize(18);
+  // Force
+  norm_msg.data[0] = f_ext_hat_.norm();
+  norm_msg.data[1] = f_ext_hat_lp_1.norm();
+  norm_msg.data[2] = f_ext_hat_lp_2.norm();
+  norm_msg.data[3] = f_ext_hat_lp_3.norm();
+  norm_msg.data[4] = f_ext_hat_lp_4.norm();
+  norm_msg.data[5] = f_ext_hat_hp_1.norm();
+  norm_msg.data[6] = f_ext_hat_hp_2.norm();
+  norm_msg.data[7] = f_ext_hat_hp_3.norm();
+  norm_msg.data[8] = f_ext_hat_hp_4.norm();
+  // Moment
+  norm_msg.data[9]  = m_ext_hat_.norm();
+  norm_msg.data[10] = m_ext_hat_lp_1.norm();
+  norm_msg.data[11] = m_ext_hat_lp_2.norm();
+  norm_msg.data[12] = m_ext_hat_lp_3.norm();
+  norm_msg.data[13] = m_ext_hat_lp_4.norm();
+  norm_msg.data[14] = m_ext_hat_hp_1.norm();
+  norm_msg.data[15] = m_ext_hat_hp_2.norm();
+  norm_msg.data[16] = m_ext_hat_hp_3.norm();
+  norm_msg.data[17] = m_ext_hat_hp_4.norm();
+  pub_filt_norm_.publish(norm_msg);
+
   prev_p_omega_ = p_omega;
 
-  // Pubblica le norme dei tre segnali per il grafico
-  static ros::NodeHandle nh;
-  static ros::Publisher pub_filt_norm = nh.advertise<std_msgs::Float64MultiArray>("/external_wrench_estimator/force_norms", 1);
-  std_msgs::Float64MultiArray norm_msg;
-  norm_msg.data.resize(3);
-  norm_msg.data[0] = f_ext_hat_.norm();
-  norm_msg.data[1] = f_ext_hat_lp_.norm();
-  norm_msg.data[2] = f_ext_hat_hp_.norm();
-  pub_filt_norm.publish(norm_msg);
-
-  // Pubblica la stima completa del wrench
+  // ----- Publish the wrench estimation -----
   std_msgs::Float64MultiArray wrench_msg;
   wrench_msg.data.resize(6);
   for (int i = 0; i < 3; ++i) {
@@ -275,7 +328,7 @@ void ExternalWrenchEstimator::timerComputeWrench(const ros::TimerEvent& te) {
     last_ok_msg_time = ros::Time::now();
   }
 
-  // Pubblica il cilindro del drone per RViz (sempre visibile)
+  // Publish the RViz marker for the drone cylinder
   visualization_msgs::Marker cyl_marker;
   cyl_marker.header.frame_id = "uav1/world_origin";
   cyl_marker.header.stamp = ros::Time::now();
@@ -299,6 +352,7 @@ void ExternalWrenchEstimator::timerComputeWrench(const ros::TimerEvent& te) {
   cyl_marker.color.g = 0.0;
   cyl_marker.color.b = 1.0;
   pub_collision_marker_.publish(cyl_marker);
+
 }
 
 void ExternalWrenchEstimator::estimateCollisionPoint(const Eigen::Vector3d& f_e, const Eigen::Vector3d& m_e,
@@ -311,13 +365,7 @@ void ExternalWrenchEstimator::estimateCollisionPoint(const Eigen::Vector3d& f_e,
   Eigen::Vector3d f_hat = f_e.normalized();
   Eigen::Vector3d m_hat = m_e.normalized();
 
-  double f_hat_dot = f_hat.dot(f_hat);
-  if (std::abs(f_hat_dot) < 1e-8) {
-    ROS_WARN_STREAM("[ExternalWrenchEstimator]: f_hat.dot(f_hat) too small, skipping contact estimation.");
-    return;
-  }
-
-  Eigen::Vector3d rc_dir = (f_hat.cross(m_hat) / f_hat_dot);
+  Eigen::Vector3d rc_dir = (f_hat.cross(m_hat) / f_hat.dot(f_hat));
 
   ROS_INFO_STREAM("f_ext_hat_: " << f_e.transpose());
   ROS_INFO_STREAM("m_ext_hat_: " << m_e.transpose());
@@ -331,7 +379,7 @@ void ExternalWrenchEstimator::estimateCollisionPoint(const Eigen::Vector3d& f_e,
       ROS_INFO_STREAM("[ExternalWrenchEstimator]: Collision detected at (body): " << rc.transpose());
       ROS_INFO_STREAM("[ExternalWrenchEstimator]: Collision detected at (world): " << rc_world.transpose());
 
-      // Marker punto di collisione (rosso)
+      // ----- Publish the collision point in RViz -----
       visualization_msgs::Marker marker;
       marker.header.frame_id = "uav1/world_origin";
       marker.header.stamp = ros::Time::now();
@@ -353,7 +401,7 @@ void ExternalWrenchEstimator::estimateCollisionPoint(const Eigen::Vector3d& f_e,
       marker.color.b = 0.0;
       pub_collision_marker_.publish(marker);
 
-      // Marker cilindro collisione (verde)
+      // ----- Publish the cylinder in RViz -----
       visualization_msgs::Marker cyl_marker;
       cyl_marker.header.frame_id = "uav1/world_origin";
       cyl_marker.header.stamp = ros::Time::now();
