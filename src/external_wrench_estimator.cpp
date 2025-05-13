@@ -44,32 +44,29 @@
 /* for operations with matrices */
 #include <Eigen/Dense>
 
-// /* for std::atomic */
+/* for std::atomic */
 #include <std_msgs/Float64.h>
 #include <std_msgs/Float64MultiArray.h>
 
 /* for visualization markers */
 #include <visualization_msgs/Marker.h>
 
+/* for math*/
+#include <math.h>
+
 //}
 
 namespace external_wrench_estimator
 {
-    
+
 class ExternalWrenchEstimator : public nodelet::Nodelet {
 
 public:
-    /* onInit() is called when nodelet is launched (similar to main() in regular node) */
     virtual void onInit();
 
 private:
-  /* flags */
   std::atomic<bool> is_initialized_ = false;
-
-  /* ros parameters */
   std::string _uav_name_;
-
-  // | ---------------------- parameters --------------------- |
   double mass_;
   double drone_radius_;
   Eigen::Matrix3d inertia_;
@@ -77,7 +74,6 @@ private:
   Eigen::MatrixXd allocation_matrix_;
   int rate_compute_wrench_;
 
-  // | ---------------------- observer parameters --------------------- |
   Eigen::Matrix3d K_I_f_ = Eigen::Matrix3d::Identity() * 2;
   Eigen::Matrix3d K_I_m_ = Eigen::Matrix3d::Identity() * 2;
   Eigen::Vector3d f_ext_hat_ = Eigen::Vector3d::Zero();
@@ -85,37 +81,32 @@ private:
   Eigen::Vector3d prev_p_omega_ = Eigen::Vector3d::Zero();
   ros::Time prev_time_;
 
-  // | --------------------- subscribers -------------------- |
+  // Filtri per la forza stimata
+  Eigen::Vector3d f_ext_hat_lp_ = Eigen::Vector3d::Zero();
+  Eigen::Vector3d f_ext_hat_hp_ = Eigen::Vector3d::Zero();
 
   mrs_lib::SubscribeHandler<nav_msgs::Odometry>               sh_odometry_;
   mrs_lib::SubscribeHandler<sensor_msgs::Imu>                 sh_imu_;
   std::vector<mrs_lib::SubscribeHandler<std_msgs::Float64>>   sh_motor_speeds_;
   mrs_lib::SubscribeHandler<geometry_msgs::Vector3Stamped>    sh_hwapi_angular_velocity_;
 
-  // | -------------------- publisher ------------------- |
   ros::Publisher pub_wrench_;
   ros::Publisher pub_collision_marker_;
 
-  // | --------------------- timers -------------------- |
   ros::Timer timer_compute_wrench_;
 
-  // | ---------------------- wrench computation ---------------------- |
   void timerComputeWrench(const ros::TimerEvent& te);
   double force_threshold_;
   double moment_threshold_;
 
-  // | ---------------------- contact point detection ---------------------- |
   void estimateCollisionPoint(const Eigen::Vector3d& f_e, const Eigen::Vector3d& m_e,
-  const Eigen::Matrix3d& R, const Eigen::Vector3d& r_body);
+    const Eigen::Matrix3d& R, const Eigen::Vector3d& r_body);
   int marker_id_ = 0;
-
 };
 
 void ExternalWrenchEstimator::onInit() {
 
   ros::NodeHandle nh = nodelet::Nodelet::getMTPrivateNodeHandle();
-  
-  // | ------------------- load ros parameters ------------------ |
   mrs_lib::ParamLoader param_loader(nh, "ExternalWrenchEstimator");
 
   std::vector<double> inertia_vec;
@@ -154,7 +145,6 @@ void ExternalWrenchEstimator::onInit() {
     return;
   }
 
-  // | ------------------ initialize subscribers ----------------- |
   mrs_lib::SubscribeHandlerOptions shopts;
   shopts.nh                 = nh;
   shopts.node_name          = "ExternalWrenchEstimator";
@@ -174,22 +164,16 @@ void ExternalWrenchEstimator::onInit() {
     sh_motor_speeds_.emplace_back(shopts, topic);
   }
 
-  // | ------------------ initialize publishers ----------------- |
-
   pub_wrench_ = nh.advertise<std_msgs::Float64MultiArray>("external_wrench_estimation_out", 1);
   pub_collision_marker_ = nh.advertise<visualization_msgs::Marker>("collision_point_marker", 1);
 
-  // | -------------------- initialize timers ------------------- |
   timer_compute_wrench_ = nh.createTimer(ros::Rate(rate_compute_wrench_),&ExternalWrenchEstimator::timerComputeWrench,this);
 
   ROS_INFO("[ExternalWrenchEstimator]: Initialized");
   is_initialized_ = true;
 }
 
-/* timerComputeWrench() //{ */
-
 void ExternalWrenchEstimator::timerComputeWrench(const ros::TimerEvent& te) {
-  // | ----------- get motor speeds ----------- |
   std::vector<double> speeds(8, 0.0);
   for (int i = 0; i < 8; ++i) {
     if (sh_motor_speeds_[i].hasMsg()) {
@@ -201,7 +185,6 @@ void ExternalWrenchEstimator::timerComputeWrench(const ros::TimerEvent& te) {
   }
   Eigen::VectorXd wrench = allocation_matrix_ * Eigen::Map<Eigen::VectorXd>(speeds.data(), speeds.size());
 
-  // | ----------- get odometry and imu ----------- |
   if (!sh_odometry_.hasMsg() || !sh_imu_.hasMsg()) {
     ROS_WARN_THROTTLE(1.0, "[ExternalWrenchEstimator]: Missing odometry or IMU data.");
     return;
@@ -209,54 +192,62 @@ void ExternalWrenchEstimator::timerComputeWrench(const ros::TimerEvent& te) {
   auto odom_msg = sh_odometry_.getMsg();
   auto imu_msg = sh_imu_.getMsg();
 
-  // Linear velocity (body frame)
   Eigen::Vector3d v(
     odom_msg->twist.twist.linear.x,
     odom_msg->twist.twist.linear.y,
     odom_msg->twist.twist.linear.z);
 
-  // Angular velocity (body frame)
   Eigen::Vector3d w(
     odom_msg->twist.twist.angular.x,
     odom_msg->twist.twist.angular.y,
     odom_msg->twist.twist.angular.z);
 
-  // Orientation (body to world)
   auto q = odom_msg->pose.pose.orientation;
   Eigen::Quaterniond q_body_to_world(q.w, q.x, q.y, q.z);
   Eigen::Matrix3d R = q_body_to_world.toRotationMatrix();
 
-  // Linear acceleration (body frame)
   Eigen::Vector3d a(
     imu_msg->linear_acceleration.x,
     imu_msg->linear_acceleration.y,
     imu_msg->linear_acceleration.z);
 
-  // | ----------- compute dt ----------- |
   double dt = 0.01;
   if (!prev_time_.isZero()) {
     dt = (te.current_real - prev_time_).toSec();
   }
   prev_time_ = te.current_real;
 
-  // | ----------- hybrid external wrench estimation ----------- |
-
   // --- Force estimation (acceleration-based) ---
   Eigen::Vector3d a_corrected = R.transpose() * (a - gravity_);
   Eigen::Vector3d f = mass_ * a_corrected;
   f_ext_hat_ += K_I_f_ * (f - f_ext_hat_) * dt;
 
+  // --- Filtri passa-basso e passa-alto sulla forza stimata ---
+  double alpha_lp = 0.95;
+  f_ext_hat_lp_ = alpha_lp * f_ext_hat_lp_ + (1.0 - alpha_lp) * f_ext_hat_;
+  f_ext_hat_hp_ = f_ext_hat_ - f_ext_hat_lp_;
+
   // --- Moment estimation (momentum-based) ---
   Eigen::Vector3d p_omega = inertia_ * w;
-  Eigen::Vector3d m = Eigen::Vector3d::Zero(); // If you have control moment, use it here
-  Eigen::Vector3d mg = Eigen::Vector3d::Zero(); // If you have CoM offset, use it here
+  Eigen::Vector3d m = Eigen::Vector3d::Zero();
+  Eigen::Vector3d mg = Eigen::Vector3d::Zero();
   Eigen::Vector3d p_omega_dot = (p_omega - prev_p_omega_) / dt;
   Eigen::Vector3d m_total = m + mg + p_omega.cross(w);
   Eigen::Vector3d m_error = p_omega_dot - m_total - m_ext_hat_;
   m_ext_hat_ += K_I_m_ * m_error * dt;
   prev_p_omega_ = p_omega;
 
-  // | ----------- publish estimated external wrench ----------- |
+  // Pubblica le norme dei tre segnali per il grafico
+  static ros::NodeHandle nh;
+  static ros::Publisher pub_filt_norm = nh.advertise<std_msgs::Float64MultiArray>("/external_wrench_estimator/force_norms", 1);
+  std_msgs::Float64MultiArray norm_msg;
+  norm_msg.data.resize(3);
+  norm_msg.data[0] = f_ext_hat_.norm();
+  norm_msg.data[1] = f_ext_hat_lp_.norm();
+  norm_msg.data[2] = f_ext_hat_hp_.norm();
+  pub_filt_norm.publish(norm_msg);
+
+  // Pubblica la stima completa del wrench
   std_msgs::Float64MultiArray wrench_msg;
   wrench_msg.data.resize(6);
   for (int i = 0; i < 3; ++i) {
@@ -278,34 +269,73 @@ void ExternalWrenchEstimator::timerComputeWrench(const ros::TimerEvent& te) {
         odom_msg->pose.pose.position.x,
         odom_msg->pose.pose.position.y,
         odom_msg->pose.pose.position.z);
-      
       estimateCollisionPoint(f_ext_hat_, m_ext_hat_, R, r_body);
   } else if ((ros::Time::now() - last_ok_msg_time).toSec() > 10.0) {
     ROS_INFO_STREAM("[ExternalWrenchEstimator]: System OK. Force: " << force_norm << " N, Moment: " << moment_norm << " Nm");
     last_ok_msg_time = ros::Time::now();
   }
 
+  // Pubblica il cilindro del drone per RViz (sempre visibile)
+  visualization_msgs::Marker cyl_marker;
+  cyl_marker.header.frame_id = "uav1/world_origin";
+  cyl_marker.header.stamp = ros::Time::now();
+  cyl_marker.ns = "drone_cylinder";
+  cyl_marker.id = 9999;
+  cyl_marker.type = visualization_msgs::Marker::CYLINDER;
+  cyl_marker.action = visualization_msgs::Marker::ADD;
+  cyl_marker.scale.x = 2 * 0.47;
+  cyl_marker.scale.y = 2 * 0.47;
+  cyl_marker.scale.z = 0.155;
+  Eigen::Vector3d cyl_center = R * Eigen::Vector3d(0, 0, -0.0195) + Eigen::Vector3d(
+    odom_msg->pose.pose.position.x,
+    odom_msg->pose.pose.position.y,
+    odom_msg->pose.pose.position.z);
+  cyl_marker.pose.position.x = cyl_center.x();
+  cyl_marker.pose.position.y = cyl_center.y();
+  cyl_marker.pose.position.z = cyl_center.z();
+  cyl_marker.pose.orientation.w = 1.0;
+  cyl_marker.color.a = 0.3;
+  cyl_marker.color.r = 0.0;
+  cyl_marker.color.g = 0.0;
+  cyl_marker.color.b = 1.0;
+  pub_collision_marker_.publish(cyl_marker);
 }
 
 void ExternalWrenchEstimator::estimateCollisionPoint(const Eigen::Vector3d& f_e, const Eigen::Vector3d& m_e,
   const Eigen::Matrix3d& R, const Eigen::Vector3d& r_body) {
-  if (f_e.norm() < 1e-3) return; // evita divisioni per zero
+  if (f_e.norm() < 1e-3 || m_e.norm() < 1e-3) {
+    ROS_INFO_STREAM("[ExternalWrenchEstimator]: Force or moment too small for point detection");
+    return;
+  }
 
   Eigen::Vector3d f_hat = f_e.normalized();
   Eigen::Vector3d m_hat = m_e.normalized();
-  Eigen::Vector3d rc_dir = f_hat.cross(m_hat) / f_hat.dot(f_hat);
 
-  for (double alpha = -0.01; alpha > -1.0; alpha -= 0.01) {
+  double f_hat_dot = f_hat.dot(f_hat);
+  if (std::abs(f_hat_dot) < 1e-8) {
+    ROS_WARN_STREAM("[ExternalWrenchEstimator]: f_hat.dot(f_hat) too small, skipping contact estimation.");
+    return;
+  }
+
+  Eigen::Vector3d rc_dir = (f_hat.cross(m_hat) / f_hat_dot);
+
+  ROS_INFO_STREAM("f_ext_hat_: " << f_e.transpose());
+  ROS_INFO_STREAM("m_ext_hat_: " << m_e.transpose());
+  ROS_INFO_STREAM("rc_dir: " << rc_dir.transpose());
+
+  for (double alpha = 0.0; alpha > -1.0; alpha -= 0.01) {
     Eigen::Vector3d rc = rc_dir + alpha * f_hat;
-    if (rc.head<2>().norm() <= drone_radius_) {
+    double z_cyl = rc.z() + 0.0195;
+    if (rc.head<2>().norm() <= drone_radius_ && std::abs(z_cyl) <= 0.155/2.0) {
       Eigen::Vector3d rc_world = R * rc + r_body;
+      ROS_INFO_STREAM("[ExternalWrenchEstimator]: Collision detected at (body): " << rc.transpose());
       ROS_INFO_STREAM("[ExternalWrenchEstimator]: Collision detected at (world): " << rc_world.transpose());
 
-      // Pubblica il marker per RViz
+      // Marker punto di collisione (rosso)
       visualization_msgs::Marker marker;
-      marker.header.frame_id = "uav1/world_origin"; // usa il frame corretto per il tuo sistema
+      marker.header.frame_id = "uav1/world_origin";
       marker.header.stamp = ros::Time::now();
-      marker.lifetime = ros::Duration(0); // 0 = infinito
+      marker.lifetime = ros::Duration(0);
       marker.ns = "collision";
       marker.id = marker_id_++;
       marker.type = visualization_msgs::Marker::SPHERE;
@@ -323,12 +353,34 @@ void ExternalWrenchEstimator::estimateCollisionPoint(const Eigen::Vector3d& f_e,
       marker.color.b = 0.0;
       pub_collision_marker_.publish(marker);
 
+      // Marker cilindro collisione (verde)
+      visualization_msgs::Marker cyl_marker;
+      cyl_marker.header.frame_id = "uav1/world_origin";
+      cyl_marker.header.stamp = ros::Time::now();
+      cyl_marker.ns = "drone_cylinder_contact";
+      cyl_marker.id = marker_id_++;
+      cyl_marker.type = visualization_msgs::Marker::CYLINDER;
+      cyl_marker.action = visualization_msgs::Marker::ADD;
+      cyl_marker.scale.x = 2 * 0.47;
+      cyl_marker.scale.y = 2 * 0.47;
+      cyl_marker.scale.z = 0.155;
+      Eigen::Vector3d cyl_center = R * Eigen::Vector3d(0, 0, -0.0195) + r_body;
+      cyl_marker.pose.position.x = cyl_center.x();
+      cyl_marker.pose.position.y = cyl_center.y();
+      cyl_marker.pose.position.z = cyl_center.z();
+      cyl_marker.pose.orientation.w = 1.0;
+      cyl_marker.color.a = 0.7;
+      cyl_marker.color.r = 0.0;
+      cyl_marker.color.g = 1.0;
+      cyl_marker.color.b = 0.0;
+      pub_collision_marker_.publish(cyl_marker);
+
       return;
     }
   }
 }
 
-}// namespace external_wrench_estimator
+} // namespace external_wrench_estimator
 
 #include <pluginlib/class_list_macros.h>
 PLUGINLIB_EXPORT_CLASS(external_wrench_estimator::ExternalWrenchEstimator, nodelet::Nodelet);
