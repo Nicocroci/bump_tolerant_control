@@ -33,12 +33,14 @@
       <remap from="~motor_speed_in5" to="motor_speed/5"/>
       <remap from="~motor_speed_in6" to="motor_speed/6"/>
       <remap from="~motor_speed_in7" to="motor_speed/7"/>
-      <remap from="~odom_uav_in" to="hw_api/odometry"/>
-      <remap from="~imu_in" to="hw_api/imu"/>
+      <remap from="~odom_uav_in"     to="hw_api/odometry"/>
+      <remap from="~imu_in"          to="hw_api/imu"/>
 
 
       <!-- Publishers (note that the topic names will also be remapped using the namespace as a prefix) -->
       <remap from="~external_wrench_estimation_out" to="estimation_manager/ext_wrench" />
+      <remap from="~contact_point_out"              to="estimation_manager/contact_point" /> 
+
 
     </node>
 

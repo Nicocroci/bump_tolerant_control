@@ -15,7 +15,7 @@ windows:
   - gazebo:
       layout: tiled
       panes:
-        - waitForRos; roslaunch mrs_uav_gazebo_simulation simulation.launch world_name:=grass_plane gui:=true
+        - waitForRos; export GAZEBO_PLUGIN_PATH=/opt/ros/noetic/lib:$GAZEBO_PLUGIN_PATH; roslaunch mrs_uav_gazebo_simulation simulation.launch world_name:=grass_plane gui:=true
         - waitForGazebo; rosservice call /mrs_drone_spawner/spawn "1 --$UAV_TYPE"
         - waitForControl; gz camera -c gzclient_camera -f $UAV_NAME; history -s gz camera -c gzclient_camera -f $UAV_NAME
   - status:
@@ -51,16 +51,23 @@ windows:
       layout: tiled
       panes:
         - 'history -s rosservice call /$UAV_NAME/control_manager/goto \"goal: \[0.0, 30.0, 1.5, 0.0\]\"'
-  - plot:
+  - example_waypoint_flier:
       layout: tiled
       panes:
-      - 'waitForControl; rqt_plot /external_wrench_estimator/force_norms/data[0] /external_wrench_estimator/force_norms/data[1] /external_wrench_estimator/force_norms/data[2]'
+        - waitForControl; roslaunch example_waypoint_flier example_waypoint_flier.launch
+        - 'history -s rosservice call /$UAV_NAME/example_waypoint_flier/fly_to_first_waypoint'
+        - 'history -s rosservice call /$UAV_NAME/example_waypoint_flier/start_waypoints_following'
+        - 'history -s rosservice call /$UAV_NAME/example_waypoint_flier/stop_waypoints_following'
   - rviz:
       layout: tiled
       panes:
         - waitForControl; roslaunch mrs_uav_core rviz.launch
         - waitForControl; roslaunch mrs_rviz_plugins load_robot.launch
   - layout:
-        layout: tiled
-        panes:
-          - waitForControl; sleep 3; ~/.i3/layout_manager.sh ./layout.json
+      layout: tiled
+      panes:
+        - waitForControl; sleep 3; ~/.i3/layout_manager.sh ./layout.json
+  - plot_fm:
+      layout: tiled
+      panes:
+        - 'waitForControl; history -s plotjuggler-ros'

@@ -19,8 +19,10 @@ SET(CATKIN_DEPENDENCIES
   )
 
 SET(LIBRARIES
-  BumpTolerantControl
   ExternalWrenchEstimator
+  BumpSwitchNode
+  ExampleWaypointFlier
+  BumpTolerantController
   )
 
 find_package(catkin REQUIRED COMPONENTS
@@ -33,36 +35,25 @@ set(Eigen_LIBRARIES ${Eigen_LIBRARIES})
 
 ## Generate dynamic parameters which are loaded by the dynamic reconfigure server
 generate_dynamic_reconfigure_options(
-  config/dynparam.cfg
+  config/bump_tolerant_controller.cfg
+  config/dynparam_example_waypoint_flier.cfg
   )
 
 catkin_package(
+  INCLUDE_DIRS include
   LIBRARIES ${LIBRARIES}
   CATKIN_DEPENDS ${CATKIN_DEPENDENCIES}
   DEPENDS Eigen
   )
 
 include_directories(
+  include
   ${catkin_INCLUDE_DIRS}
   ${Eigen_INCLUDE_DIRS}
   )
-## Declare a C++ library
-add_library(BumpTolerantControl
-  src/bump_tolerant_control.cpp
-  )
 
-## Add configure headers for dynamic reconfigure
-add_dependencies(BumpTolerantControl
-  ${PROJECT_NAME}_gencfg
-  )
 
-## Specify libraries to link a library or executable target against
-target_link_libraries(BumpTolerantControl
-  ${catkin_LIBRARIES}
-  ${Eigen_LIBRARIES}
-  )
-
-## Declare the ExternalWrenchEstimator nodelet library
+## Declare the nodelet libraries
 add_library(ExternalWrenchEstimator
   src/external_wrench_estimator.cpp
   )
@@ -71,13 +62,43 @@ target_link_libraries(ExternalWrenchEstimator
   ${catkin_LIBRARIES}
   ${Eigen_LIBRARIES}
   )
+
+add_library(BumpSwitchNode
+  src/bump_switch_node.cpp
+  )
+
+target_link_libraries(BumpSwitchNode
+  ${catkin_LIBRARIES}
+  ${Eigen_LIBRARIES}
+  )
+
+add_library(ExampleWaypointFlier
+  src/example_waypoint_flier.cpp
+  )
+
+add_dependencies(ExampleWaypointFlier
+  ${PROJECT_NAME}_gencfg
+  )
+
+target_link_libraries(ExampleWaypointFlier
+  ${catkin_LIBRARIES}
+  ${Eigen_LIBRARIES}
+  )
   
+add_library(BumpTolerantController
+  src/bump_tolerant_controller.cpp
+)
+
+target_link_libraries(BumpTolerantController
+  ${catkin_LIBRARIES}
+  ${Eigen_LIBRARIES}
+)
 ## Declare a C++ executable
 add_executable(imu_listener
   src/imu_listener.cpp
   )
 
-  target_link_libraries(imu_listener
+target_link_libraries(imu_listener
   ${catkin_LIBRARIES}
   )
 ## Add configure headers for dynamic reconfigure
@@ -98,3 +119,7 @@ install(DIRECTORY launch config
 install(FILES nodelets.xml
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
   )
+
+install(FILES plugins.xml
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+)

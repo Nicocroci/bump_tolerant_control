@@ -1,24 +1,41 @@
 mrs_uav_managers:
 
   estimation_manager:
-
-    # loaded state estimator plugins
     state_estimators: [
       "gps_baro",
     ]
+    initial_state_estimator: "gps_baro"
+    agl_height_estimator: ""
 
-    initial_state_estimator: "gps_baro" # will be used as the first state estimator
-    agl_height_estimator: "" # only slightly filtered height for checking min height (not used in control feedback)
+  control_manager:
+
+    bump_tolerant_controller:
+      address: "bump_tolerant_control/BumpTolerantController"
+      namespace: "bump_tolerant_controller"
+      eland_threshold: 20.0
+      failsafe_threshold: 30.0
+      odometry_innovation_threshold: 1.5
+      human_switchable: true
+      outputs:
+        actuators:             false
+        control_group:         false
+        attitude_rate:         false
+        attitude:              true
+        acceleration_hdg_rate: false
+        acceleration_hdg:      false
+        velocity_hdg_rate:     false
+        velocity_hdg:          false
+        position:              false
+
+    controllers: [
+      "bump_tolerant_controller"
+    ]
 
   uav_manager:
-
     takeoff:
-
       during_takeoff:
         controller: "MpcController"
         tracker: "LandoffTracker"
-
       after_takeoff:
-        controller: "MpcController" # more robust
-        # controller: "Se3Controller" # more precise
+        controller: "MpcController"
         tracker: "MpcTracker"

@@ -1,10 +1,15 @@
-<library path="lib/libBumpTolerantControl">
-  <class name="bump_tolerant_control/BumpTolerantControl" type="bump_tolerant_control::BumpTolerantControl" base_class_type="nodelet::Nodelet">
-    <description>BumpTolerantControl nodelet</description>
-  </class>
-</library>
 <library path="lib/libExternalWrenchEstimator">
   <class name="external_wrench_estimator/ExternalWrenchEstimator" type="external_wrench_estimator::ExternalWrenchEstimator" base_class_type="nodelet::Nodelet">
     <description>Nodelet for external wrench estimation</description>
+  </class>
+</library>
+<library path="lib/libBumpSwitchNode">
+  <class name="bump_switch_node/BumpSwitchNode" type="bump_switch_node::BumpSwitchNode" base_class_type="nodelet::Nodelet">
+    <description>Nodelet for controller switch</description>
+  </class>
+</library>
+<library path="lib/libExampleWaypointFlier">
+  <class name="example_waypoint_flier/ExampleWaypointFlier" type="example_waypoint_flier::ExampleWaypointFlier" base_class_type="nodelet::Nodelet">
+    <description>ExampleWaypointFlier nodelet</description>
   </class>
 </library>

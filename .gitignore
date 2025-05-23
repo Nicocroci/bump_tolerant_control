@@ -4,3 +4,5 @@ logs/
 *.pyc
 __pychace__/
 *.swp
+.catkin_tools/
+.vscode/

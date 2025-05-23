@@ -1,0 +1,7 @@
+<library path="lib/libBumpTolerantController">
+  <class name="bump_tolerant_control/BumpTolerantController"
+         type="bump_tolerant_controller_plugin::bump_tolerant_controller::BumpTolerantController"
+         base_class_type="mrs_uav_managers::Controller">
+    <description>Bump tolerant controller</description>
+  </class>
+</library>

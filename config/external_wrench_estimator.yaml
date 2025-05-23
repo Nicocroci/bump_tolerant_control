@@ -14,7 +14,7 @@ rate:
   compute_wrench: 20 # [Hz]
 
 #Mass of the UAV
-mass : 7.5 # [kg]
+mass: 7.5 # [kg]
 
 #Inertia of the UAV
 inertia: [0.1827, 0, 0, 0, 0.1827, 0, 0, 0, 0.3154] # [kg*m^2]
@@ -23,8 +23,8 @@ inertia: [0.1827, 0, 0, 0, 0.1827, 0, 0, 0, 0.3154] # [kg*m^2]
 gravity: [0, 0, 9.81] # [m/s^2]
 
 #Thresholds for the wrench estimator
-force_threshold: 10    # [N]
-moment_threshold: 0.2  # [Nm]
+force_threshold: 3    # [N]
+moment_threshold: 0.8  # [Nm]
 
 #Drone radius
 drone_radius : 0.47 # [m]
