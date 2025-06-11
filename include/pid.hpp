@@ -33,6 +33,11 @@ public:
   void reset(void);
 
   double update(const double &error, const double &dt);
+
+  // Getter methods for PID gains
+  double getKp() const { return _kp_; }
+  double getKi() const { return _ki_; }
+  double getKd() const { return _kd_; }
 };
 
 // --------------------------------------------------------------

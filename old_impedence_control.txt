@@ -1,0 +1,247 @@
+else if (wall_interaction_state_ == SLIDING_ALONG_WALL_1) {
+
+    // ——————— LOG “ENTERING SLIDING” ———————
+    if (first_sliding_iteration_) {
+      first_sliding_iteration_ = false;
+      if (rotation_delta_ > 0.0) {
+        double rotation_dir = 1.0; // Clockwise
+      }else {
+        double rotation_dir = -1.0; // Counter-clockwise
+      }
+    
+      double cos_angle_abs = std::abs(std::cos(angle_force_normal_));
+      ROS_INFO("[%s][SLIDING]: EStimated forces : x=%.3f, y=%.3f.",
+               name_.c_str(), f_e_comp_b_xy.x(), f_e_comp_b_xy.y() );
+
+      if (cos_angle_abs > PARALLEL_THRESHOLD_HIGH) {
+        ROS_INFO("[%s][SLIDING]: Wall normal parallel to x-axis.", name_.c_str());
+        is_parallel_to_ = "X";
+      } else if (cos_angle_abs < PARALLEL_THRESHOLD_LOW) {
+        ROS_INFO("[%s][SLIDING]: Wall normal parallel to y-axis.", name_.c_str());
+        is_parallel_to_ = "Y";
+      } else {
+        // Ambiguo: usa rotazione e prodotto delle forze
+        bool clockwise = rotation_delta_ > 0.0;
+        bool positive_product = forces_product_ > 0.0;
+        ROS_INFO("[%s][SLIDING]: Rotation delta: %.3f rad, forces product: %.3f.",
+                 name_.c_str(), rotation_delta_, forces_product_);
+
+        if ((clockwise && positive_product) || (!clockwise && !positive_product)) {
+          ROS_INFO("[%s][SLIDING]: Wall normal parallel to x-axis, %s rotation of %.3f deg.", 
+                  name_.c_str(), clockwise ? "clockwise" : "counter-clockwise", rotation_delta_* 180.0 / M_PI);
+          is_parallel_to_ = "X";
+        } else {
+          ROS_INFO("[%s][SLIDING]: Wall normal parallel to y-axis, %s rotation of %.3f deg.", 
+                  name_.c_str(), clockwise ? "clockwise" : "counter-clockwise", rotation_delta_* 180.0 / M_PI);
+          is_parallel_to_ = "Y";
+        }
+      }
+    }
+
+    // 5.0) CALCOLO POSIZIONE PARETE
+    m_0 = tan(current_yaw);
+    q_0 = uav_pos_W.y() - m_0 * uav_pos_W.x();
+    if (m_data.size() >= max_size) {
+        m_data.pop_front();
+        q_data.pop_front();
+    }
+    m_data.push_back(m_0);
+    q_data.push_back(q_0);
+    int n = m_data.size();
+    Eigen::MatrixXd X(n, 2);
+    Eigen::VectorXd Y(n);
+
+    for (int i = 0; i < n; ++i) {
+        X(i, 0) = m_data[i];
+        X(i, 1) = 1.0;
+        Y(i) = q_data[i];
+    }
+
+    Eigen::Vector2d beta = (X.transpose() * X).ldlt().solve(X.transpose() * Y);
+
+    m_wall = beta(0); //slope of the wall
+    q_wall = beta(1);
+    Eigen::Vector3d wall_tangent(1.0, m_wall, 0.0);
+    wall_tangent.normalize();
+    Eigen::Vector3d wall_normal(-m_wall, 1.0, 0.0);
+    wall_normal.normalize();
+    wall_normal_inertial_estimate_ = wall_normal;
+    ROS_INFO("[%s][SLIDING]: Wall normal estimate: [%.3f, %.3f, %.3f]", name_.c_str(),
+                       wall_normal_inertial_estimate_.x(),
+                       wall_normal_inertial_estimate_.y(),
+                       wall_normal_inertial_estimate_.z());
+
+    // 5.1) CALCOLA TANGENTE DI SCORRIMENTO E FORZE
+    Eigen::Vector3d world_z_W(0, 0, 1);
+    sliding_tangent_inertial_cmd_ = world_z_W.cross(wall_normal_inertial_estimate_);
+    if (sliding_tangent_inertial_cmd_.norm() < 0.1) {
+      Eigen::Vector3d world_x_W(1, 0, 0);
+      sliding_tangent_inertial_cmd_ = (world_x_W - world_x_W.dot(wall_normal_inertial_estimate_) * wall_normal_inertial_estimate_);
+    }
+    sliding_tangent_inertial_cmd_.normalize();
+    if (sliding_tangent_inertial_cmd_.norm() < 0.1) {
+      sliding_tangent_inertial_cmd_ = Eigen::Vector3d(1, 0, 0);
+      if (std::abs(wall_normal_inertial_estimate_.dot(sliding_tangent_inertial_cmd_)) > 0.9) {
+        sliding_tangent_inertial_cmd_ = Eigen::Vector3d(0, 1, 0);
+      }
+    }
+    
+
+    // 5.2) Forza di contatto e scorrimento
+    Eigen::Vector3d additional_force_cmd_W = Eigen::Vector3d::Zero();
+    double current_contact_force_component = f_e_hat_inertial.dot(wall_normal_inertial_estimate_);
+    double force_error_normal = (-p_desired_contact_force_) - current_contact_force_component;
+    ROS_INFO("[%s][SLIDING] Current contact force: %.3f, desired: %.3f, error: %.3f",
+                      name_.c_str(),
+                      current_contact_force_component,
+                      -p_desired_contact_force_,
+                      force_error_normal);
+
+    force_integral_error_ += force_error_normal * dt;
+    force_integral_error_ = std::clamp(force_integral_error_, -p_sliding_force_integral_limit_, p_sliding_force_integral_limit_);
+    double f_adjust_normal = p_sliding_kp_force_ * force_error_normal + p_sliding_ki_force_ * force_integral_error_;
+    additional_force_cmd_W -= wall_normal_inertial_estimate_ * f_adjust_normal;
+
+    Eigen::Vector3d tracker_pos_W(tracker_command.position.x,
+                                  tracker_command.position.y,
+                                  tracker_command.position.z);
+    ROS_INFO("[%s][SLIDING] Tracker position: [%.3f, %.3f, %.3f]",
+                      name_.c_str(),
+                      tracker_pos_W.x(),
+                      tracker_pos_W.y(),
+                      tracker_pos_W.z());
+    
+    double dist_to_tracker_on_tangent = (tracker_pos_W - uav_pos_W).dot(sliding_tangent_inertial_cmd_);
+    double pos_error_tangent = dist_to_tracker_on_tangent;
+
+    double delta = 0.1;
+    if (is_parallel_to_ == "X") {
+        sliding_tangent_inertial_cmd_ = Eigen::Vector3d(delta, 0, 0);
+    } else {
+        sliding_tangent_inertial_cmd_ = Eigen::Vector3d(0, delta, 0);
+    }
+
+    auto q = odom_msg->pose.pose.orientation;
+    Eigen::Quaterniond q_body_to_world(q.w, q.x, q.y, q.z);
+    Eigen::Matrix3d R_B_to_W = q_body_to_world.toRotationMatrix();
+
+    Eigen::Vector3d desired_pos= uav_pos_W + R_B_to_W * sliding_tangent_inertial_cmd_ ;
+
+    Eigen::Vector3d tracker_vel_W(tracker_command.velocity.x,
+                                  tracker_command.velocity.y,
+                                  tracker_command.velocity.z);
+    double vel_error_tangent = tracker_vel_W.dot(sliding_tangent_inertial_cmd_) - uav_vel_W.dot(sliding_tangent_inertial_cmd_);
+    double f_cmd_tangent = p_sliding_kp_pos_tangent_ * pos_error_tangent + p_sliding_kd_pos_tangent_ * vel_error_tangent;
+    additional_force_cmd_W += sliding_tangent_inertial_cmd_ * f_cmd_tangent;
+
+    double pos_error_z = tracker_command.position.z - uav_pos_W.z();
+    double vel_error_z = tracker_command.velocity.z - uav_vel_W.z();
+    double f_cmd_z = p_sliding_kp_pos_z_ * pos_error_z + p_sliding_kd_pos_z_ * vel_error_z;
+    additional_force_cmd_W.z() += f_cmd_z;
+
+    Eigen::Vector3d gravity_comp_W(0, 0, total_mass * common_handlers_->g);
+    Eigen::Vector3d feedforward_acc_force_W = total_mass * Eigen::Vector3d(
+        tracker_command.acceleration.x,
+        tracker_command.acceleration.y,
+        tracker_command.acceleration.z);
+
+    Eigen::Vector3d disturbance_comp_W = Eigen::Vector3d::Zero();
+    {
+      std::scoped_lock lock(mutex_integrals_);
+      disturbance_comp_W.head<2>() = Iw_w_;
+      Eigen::Matrix3d R_B_to_W_yaw_only = mrs_lib::AttitudeConverter(0, 0, current_yaw);
+      disturbance_comp_W += R_B_to_W_yaw_only * Eigen::Vector3d(Ib_b_.x(), Ib_b_.y(), 0);
+    }
+
+    Eigen::Vector3d total_force_cmd_W = gravity_comp_W
+                                      + feedforward_acc_force_W
+                                      + additional_force_cmd_W
+                                      - disturbance_comp_W;
+
+    // 5.3) Calcola desired attitude per lo sliding
+    Eigen::Vector3d desired_att_body_x_W, desired_att_body_y_W, desired_att_body_z_W;
+
+    if (is_parallel_to_ == "X") {
+      // x_body verso la parete (come ora)
+      desired_att_body_x_W = -wall_normal_inertial_estimate_;
+      desired_att_body_y_W = sliding_tangent_inertial_cmd_;
+      desired_att_body_z_W = desired_att_body_x_W.cross(desired_att_body_y_W).normalized();
+      desired_att_body_y_W = desired_att_body_z_W.cross(desired_att_body_x_W).normalized();
+    } else if (is_parallel_to_ == "Y") {
+      // y_body verso la parete (drone "di lato")
+      desired_att_body_y_W = -wall_normal_inertial_estimate_;
+      desired_att_body_x_W = sliding_tangent_inertial_cmd_;
+      desired_att_body_z_W = desired_att_body_x_W.cross(desired_att_body_y_W).normalized();
+      desired_att_body_x_W = desired_att_body_y_W.cross(desired_att_body_z_W).normalized();
+    } else {
+      // fallback: x_body verso la parete
+      desired_att_body_x_W = -wall_normal_inertial_estimate_;
+      desired_att_body_y_W = sliding_tangent_inertial_cmd_;
+      desired_att_body_z_W = desired_att_body_x_W.cross(desired_att_body_y_W).normalized();
+      desired_att_body_y_W = desired_att_body_z_W.cross(desired_att_body_x_W).normalized();
+    }
+
+    if (desired_att_body_x_W.norm() < 0.1 ||
+        desired_att_body_y_W.norm() < 0.1 ||
+        desired_att_body_z_W.norm() < 0.1) {
+      ROS_WARN_THROTTLE(1.0, "[%s]: SLIDING: Degenerate desired attitude axes. Hover.", name_.c_str());
+      last_control_output_ = hoveringControlOutput(dt);
+      return;
+    }
+
+    Eigen::Matrix3d R_desired_att_B_to_W;
+    R_desired_att_B_to_W.col(0) = desired_att_body_x_W;
+    R_desired_att_B_to_W.col(1) = desired_att_body_y_W;
+    R_desired_att_B_to_W.col(2) = desired_att_body_z_W;
+    mrs_lib::AttitudeConverter desired_attitude_slide(R_desired_att_B_to_W);
+
+    Eigen::Vector3d z_body_world = R_B_to_W.col(2);
+    double tilt_rad = std::acos(z_body_world.dot(Eigen::Vector3d::UnitZ()));
+    double tilt_deg = tilt_rad * 180.0 / M_PI;
+
+    Eigen::Vector3d z_body_des = R_desired_att_B_to_W.col(2); // <-- usa la terza colonna
+    double desired_tilt_rad = std::acos(z_body_des.dot(Eigen::Vector3d(0, 0, 1)));
+    double desired_tilt_deg = desired_tilt_rad * 180.0 / M_PI;
+
+    ROS_INFO("[%s][SLIDING] Actual/Desired attitude: roll=%.3f/%.3f, pitch=%.3f/%.3f, yaw=%.3f/%.3f, tilt=%.3f/%.3f deg,",
+                      name_.c_str(),
+                      current_roll, desired_attitude_slide.getRoll(),
+                      current_pitch, desired_attitude_slide.getPitch(),
+                      current_yaw, desired_attitude_slide.getYaw(),
+                      tilt_deg, desired_tilt_deg);
+
+    double thrust_mag = total_force_cmd_W.dot(desired_att_body_z_W);
+    thrust_mag = std::max(thrust_mag, 0.1 * total_mass * common_handlers_->g);
+
+    // 5.4) Costruisco il comando di attitude + thrust per lo sliding
+    mrs_msgs::HwApiAttitudeCmd attitude_cmd_slide;
+    attitude_cmd_slide.orientation = desired_attitude_slide;
+    attitude_cmd_slide.throttle    = mrs_lib::quadratic_throttle_model::forceToThrottle(
+        common_handlers_->throttle_model,
+        thrust_mag);
+
+    // ASSEGNO SEMPRE qua il control_output per SLIDING
+    last_control_output_.control_output = attitude_cmd_slide;
+    last_control_output_.desired_orientation = Eigen::Quaterniond(
+        attitude_cmd_slide.orientation.w,
+        attitude_cmd_slide.orientation.x,
+        attitude_cmd_slide.orientation.y,
+        attitude_cmd_slide.orientation.z);
+
+    ROS_INFO("[%s][SLIDING] thrust=%.3f, att_quat=[%.3f, %.3f, %.3f, %.3f]",
+                      name_.c_str(),
+                      attitude_cmd_slide.throttle,
+                      attitude_cmd_slide.orientation.x,
+                      attitude_cmd_slide.orientation.y,
+                      attitude_cmd_slide.orientation.z,
+                      attitude_cmd_slide.orientation.w);
+
+    // 5.5) Se contatto viene perso, torno ad ALIGNING
+    if (std::abs(current_contact_force_component) < 0.3 * p_desired_contact_force_ &&
+        (ros::Time::now() - last_wall_normal_update_time_).toSec() > 0.5) {
+      ROS_INFO("[%s]: Forza contatto persa. Passo a ALIGNING.", name_.c_str());
+      wall_interaction_state_ = ALIGNING_TO_WALL;
+      first_alignment_iteration_ = true;
+      has_wall_normal_estimate_ = false;
+    }
+  }

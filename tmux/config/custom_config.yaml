@@ -3,32 +3,63 @@ mrs_uav_managers:
   estimation_manager:
     state_estimators: [
       "gps_baro",
+      "ground_truth",
     ]
-    initial_state_estimator: "gps_baro"
-    agl_height_estimator: ""
+
+    initial_state_estimator: "gps_baro" # will be used as the first state estimator
+    agl_height_estimator: "" 
+    agl_height_estimator.enabled: false
 
   control_manager:
+    
+    mass: 7.5
+    uav_mass: 7.5
 
-    bump_tolerant_controller:
+    # Disabilita tutti i failsafe
+    enable_failsafe: false
+    
+    # Configura soglie molto alte
+    failsafe:
+      enabled: false
+      tilt_limit: 180.0          # 90 gradi invece di ~30
+      throttle_limit: 2.0       # 100% throttle
+      yaw_error_limit: 10     # 360 gradi
+      
+    # Disabilita emergency landing
+    eland:
+      enabled: false
+      tilt_limit: 180.0 # Added to explicitly set a high tilt limit for eland
+      
+    # Disabilita emergency controller
+    emergency_controller:
+      enabled: false
+      
+    # Disabilita constraint checking
+    constraints:
+      check_constraints: false
+
+    BumpTolerantController:
       address: "bump_tolerant_control/BumpTolerantController"
       namespace: "bump_tolerant_controller"
-      eland_threshold: 20.0
-      failsafe_threshold: 30.0
+      eland_threshold: 2500.0
+      failsafe_threshold: 300.0
       odometry_innovation_threshold: 1.5
+      emergency_controller_enabled: false
+      emergency_controller_address: "bump_tolerant_control/BumpTolerantController"
       human_switchable: true
       outputs:
-        actuators:             false
-        control_group:         false
-        attitude_rate:         false
+        actuators:             true
+        control_group:         true
+        attitude_rate:         true
         attitude:              true
-        acceleration_hdg_rate: false
-        acceleration_hdg:      false
-        velocity_hdg_rate:     false
-        velocity_hdg:          false
-        position:              false
+        acceleration_hdg_rate: true
+        acceleration_hdg:      true
+        velocity_hdg_rate:     true
+        velocity_hdg:          true
+        position:              true
 
     controllers: [
-      "bump_tolerant_controller"
+      "BumpTolerantController"
     ]
 
   uav_manager:
@@ -39,3 +70,29 @@ mrs_uav_managers:
       after_takeoff:
         controller: "MpcController"
         tracker: "MpcTracker"
+
+    min_height_checking:
+      enabled: false
+
+    max_height_checking:
+      enabled: false    
+      
+    # Disabilita tutti i failsafe
+    enable_failsafe: false
+    
+    # Configura soglie molto alte
+    failsafe:
+      enabled: false
+      tilt_limit: 180.0          # 90 gradi invece di ~30
+      throttle_limit: 2.0       # 100% throttle
+      yaw_error_limit: 10     # 360 gradi
+      
+    # Disabilita emergency landing
+    eland:
+      enabled: false
+      tilt_limit: 180.0 # Added to explicitly set a high tilt limit for eland
+      
+    # Disabilita emergency controller
+    emergency_controller:
+      enabled: false
+    

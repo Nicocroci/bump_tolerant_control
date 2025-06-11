@@ -38,9 +38,14 @@
 
 
       <!-- Publishers (note that the topic names will also be remapped using the namespace as a prefix) -->
-      <remap from="~external_wrench_estimation_out" to="estimation_manager/ext_wrench" />
-      <remap from="~contact_point_out"              to="estimation_manager/contact_point" /> 
-
+      <remap from="~external_wrench_estimation_out"       to="external_wrench_estimator/ext_wrench" />
+      <remap from="~contact_point_out"                    to="external_wrench_estimator/contact_point" /> 
+      <remap from="~force_moment_norms_filt_out"          to="external_wrench_estimator/force_moment_norms_filt" />
+      <remap from="~force_components_filt_out"            to="external_wrench_estimator/force_components_filt" />
+      <remap from="~moment_components_filt_out"           to="external_wrench_estimator/moment_components_filt" />
+      <remap from="~collision_point_marker_out"           to="external_wrench_estimator/collision_point_marker" />
+      <remap from="~contact_event_out"                    to="external_wrench_estimator/contact_event" />
+      <remap from="~current_controller_out"               to="external_wrench_estimator/current_controller" />
 
     </node>
 

@@ -297,18 +297,12 @@ bool MpcController::initialize(const ros::NodeHandle &nh, std::shared_ptr<mrs_ua
   private_handlers->param_loader->loadParam(yaml_namespace + "mpc/mpc_parameters/horizontal/max_acceleration", _max_acceleration_horizontal_);
   private_handlers->param_loader->loadParam(yaml_namespace + "mpc/mpc_parameters/horizontal/max_jerk", _max_jerk_);
 
-  private_handlers->param_loader->loadParam(yaml_namespace + "mpc/mpc_parameters/horizontal/Q", _mat_Q_);
-  private_handlers->param_loader->loadParam(yaml_namespace + "mpc/mpc_parameters/horizontal/S", _mat_S_);
 
   private_handlers->param_loader->loadParam(yaml_namespace + "mpc/mpc_parameters/vertical/max_speed", _max_speed_vertical_);
   private_handlers->param_loader->loadParam(yaml_namespace + "mpc/mpc_parameters/vertical/max_acceleration", _max_acceleration_vertical_);
   private_handlers->param_loader->loadParam(yaml_namespace + "mpc/mpc_parameters/vertical/max_u", _max_u_vertical_);
 
-  private_handlers->param_loader->loadParam(yaml_namespace + "mpc/mpc_parameters/vertical/Q", _mat_Q_z_);
-  private_handlers->param_loader->loadParam(yaml_namespace + "mpc/mpc_parameters/vertical/S", _mat_S_z_);
 
-  private_handlers->param_loader->loadParam(yaml_namespace + "mpc/solver/verbose", _mpc_solver_verbose_);
-  private_handlers->param_loader->loadParam(yaml_namespace + "mpc/solver/max_iterations", _mpc_solver_max_iterations_);
 
   // | ------------------------- rampup ------------------------- |
 
@@ -327,20 +321,6 @@ bool MpcController::initialize(const ros::NodeHandle &nh, std::shared_ptr<mrs_ua
   // | ------------- height and attitude controller ------------- |
 
   // attitude gains
-  private_handlers->param_loader->loadParam(yaml_namespace + "so3/gains/attitude/roll_pitch", gains_.kq_roll_pitch);
-  private_handlers->param_loader->loadParam(yaml_namespace + "so3/gains/attitude/yaw", gains_.kq_yaw);
-
-  // attitude rate gains
-  private_handlers->param_loader->loadParam(yaml_namespace + "so3/gains/attitude_rate/roll_pitch", gains_.kw_rp);
-  private_handlers->param_loader->loadParam(yaml_namespace + "so3/gains/attitude_rate/yaw", gains_.kw_y);
-
-  // mass estimator
-  private_handlers->param_loader->loadParam(yaml_namespace + "so3/mass_estimator/km", gains_.km);
-  private_handlers->param_loader->loadParam(yaml_namespace + "so3/mass_estimator/km_lim", gains_.km_lim);
-
-  // constraints
-  private_handlers->param_loader->loadParam(yaml_namespace + "so3/constraints/tilt_angle_failsafe/enabled", _tilt_angle_failsafe_enabled_);
-  private_handlers->param_loader->loadParam(yaml_namespace + "so3/constraints/tilt_angle_failsafe/limit", _tilt_angle_failsafe_);
 
   _tilt_angle_failsafe_ = M_PI * (_tilt_angle_failsafe_ / 180.0);
 
@@ -1711,7 +1691,7 @@ void MpcController::MPC(const mrs_msgs::UavState &uav_state, const mrs_msgs::Tra
   }
 
   // | ---------- construct the attitude rate reference --------- |
-
+attitudeController
   if (output_modality == common::ATTITUDE_RATE) {
 
     last_control_output_.control_output = attitude_rate_command;
@@ -1751,7 +1731,9 @@ void MpcController::MPC(const mrs_msgs::UavState &uav_state, const mrs_msgs::Tra
 
 //}
 
-/* positionPassthrough() //{ */
+
+
+//}/* positionPassthrough() //{ */
 
 void MpcController::positionPassthrough(const mrs_msgs::UavState &uav_state, const mrs_msgs::TrackerCommand &tracker_command) {
 
@@ -2120,8 +2102,6 @@ double MpcController::getHeadingSafely(const mrs_msgs::UavState &uav_state, cons
 
   return 0;
 }
-
-//}
 
 //}
 
