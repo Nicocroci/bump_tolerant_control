@@ -27,6 +27,7 @@
 
 /* custom msgs of MRS group */
 #include <mrs_msgs/ControlManagerDiagnostics.h>
+#include <mrs_msgs/UavState.h>
 // #include <mrs_msgs/Float64Stamped.h>
 #include <mrs_msgs/ReferenceStamped.h>
 
@@ -37,6 +38,7 @@
 #include <mrs_lib/attitude_converter.h>
 #include <mrs_lib/msg_extractor.h>
 #include <mrs_lib/geometry/misc.h>
+#include <mrs_msgs/FutureTrajectory.h>
 
 /* for calling simple ros services */
 #include <std_srvs/Trigger.h>
@@ -49,6 +51,7 @@
 #include <std_msgs/Float64.h>
 #include <std_msgs/Float64MultiArray.h>
 #include <std_msgs/String.h>
+#include <std_msgs/Bool.h>
 
 /* for visualization markers */
 #include <visualization_msgs/Marker.h>
@@ -78,6 +81,7 @@ private:
   // | --------------------- uav model parameters --------------------- |
 
   std::string     _uav_name_;
+  mrs_msgs::UavState uav_state_;
   double          mass_;
   double          drone_radius_;
   Eigen::Matrix3d inertia_;
@@ -89,6 +93,7 @@ private:
   Eigen::Matrix3d K_I_f_ = Eigen::Matrix3d::Identity() * 10;
   Eigen::Matrix3d K_I_m_ = Eigen::Matrix3d::Identity() * 36;
   Eigen::VectorXd wrench;
+  double filtered_speeds[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 
   // | ---------------------- wrench estimation ---------------------- |
 
@@ -106,11 +111,14 @@ private:
 
   // | ------------------------ subscribers ------------------------ |
 
-  mrs_lib::SubscribeHandler<nav_msgs::Odometry>               sh_odometry_;
-  mrs_lib::SubscribeHandler<sensor_msgs::Imu>                 sh_imu_;
-  std::vector<mrs_lib::SubscribeHandler<std_msgs::Float64>>   sh_motor_speeds_;
-  mrs_lib::SubscribeHandler<geometry_msgs::Vector3Stamped>    sh_hwapi_angular_velocity_;
+  mrs_lib::SubscribeHandler<nav_msgs::Odometry>                  sh_odometry_;
+  mrs_lib::SubscribeHandler<sensor_msgs::Imu>                    sh_imu_;
+  std::vector<mrs_lib::SubscribeHandler<std_msgs::Float64>>      sh_motor_speeds_;
+  mrs_lib::SubscribeHandler<geometry_msgs::Vector3Stamped>       sh_hwapi_angular_velocity_;
   mrs_lib::SubscribeHandler<mrs_msgs::ControlManagerDiagnostics> sh_control_diagnostics_;
+  mrs_lib::SubscribeHandler<std_msgs::Bool>                      sh_switch_command_;
+  mrs_lib::SubscribeHandler<mrs_msgs::FutureTrajectory>          sh_predicted_trajectory_;
+  mrs_lib::SubscribeHandler<nav_msgs::Odometry>                  sh_gps_baro_;
 
   // | ------------------------ publishers ------------------------- |
 
@@ -123,22 +131,36 @@ private:
   ros::Publisher pub_contact_event_;
   ros::Publisher pub_controller_status_;
   ros::Publisher pub_activation_disturbance_b_;
+  ros::Publisher pub_position;
+  ros::Publisher pub_internal_wrench_;
 
   // | -------------------------- timers -------------------------- |
 
   ros::Timer timer_compute_wrench_;
   ros::Timer timer_publish_controller_status_;
-  ros::Timer timer_debug_switch_;  // ✅ Aggiungi questo timer di debug
-
+  ros::Timer timer_debug_switch_;
+  ros::Timer contact_point_timer_;
+  
   void timerComputeWrench(const ros::TimerEvent& te);
   void timerPublishControllerStatus(const ros::TimerEvent& te);
   void timerDebugSwitch(const ros::TimerEvent& te);
+  void timerCheckControllerAndSendPoint(const ros::TimerEvent& te);
 
   // | ---------------------- main functions ---------------------- |
 
   Eigen::Vector3d estimateCollisionPoint(const Eigen::Vector3d& f_e, const Eigen::Vector3d& m_e,
     const Eigen::Matrix3d& R, const Eigen::Vector3d& r_body, const std::string& r_body_frame_id);
   int marker_id_ = 0;
+  
+  // | ----------------- contact point management ----------------- |
+
+  ros::ServiceClient switch_controller_client_;
+  std::mutex controller_switch_mutex_;
+  bool controller_switch_pending_ = false;
+  bool contact_point_sent_ = false;
+  Eigen::Vector3d pending_contact_point_ = Eigen::Vector3d::Zero();
+  ros::Time controller_switch_time_;
+
 
 };
 //}
@@ -192,6 +214,7 @@ void ExternalWrenchEstimator::onInit() {
   inertia_ = Eigen::Map<const Eigen::Matrix<double, 3, 3, Eigen::RowMajor>>(inertia_vec.data());
 
   gravity_ = Eigen::Vector3d(gravity_vec[0], gravity_vec[1], gravity_vec[2]);
+  ROS_INFO("[ExternalWrenchEstimator]: gravity vector: [%.2f, %.2f, %.2f]", gravity_[0], gravity_[1], gravity_[2]);
 
   if (!param_loader.loadedSuccessfully()) {
     ROS_ERROR("[ExternalWrenchEstimator]: Failed to load non-optional parameters!");
@@ -214,6 +237,9 @@ void ExternalWrenchEstimator::onInit() {
   sh_imu_                    = mrs_lib::SubscribeHandler<sensor_msgs::Imu>(shopts, "imu_in");
   sh_hwapi_angular_velocity_ = mrs_lib::SubscribeHandler<geometry_msgs::Vector3Stamped>(shopts, "/uav1/hw_api/angular_velocity");
   sh_control_diagnostics_    = mrs_lib::SubscribeHandler<mrs_msgs::ControlManagerDiagnostics>(shopts, "/uav1/control_manager/diagnostics");
+  sh_switch_command_         = mrs_lib::SubscribeHandler<std_msgs::Bool>(shopts, "switch_cmd_in");
+  sh_predicted_trajectory_   = mrs_lib::SubscribeHandler<mrs_msgs::FutureTrajectory>(shopts, "/uav1/control_manager/mpc_tracker/predicted_trajectory");
+  sh_gps_baro_               = mrs_lib::SubscribeHandler<nav_msgs::Odometry>(shopts, "gps_baro_in");
 
   sh_motor_speeds_.reserve(8);
   for (int i = 0; i < 8; ++i) {
@@ -231,15 +257,23 @@ void ExternalWrenchEstimator::onInit() {
   pub_collision_marker_  = nh.advertise<visualization_msgs::Marker>("collision_point_marker_out", 1);
   pub_contact_event_     = nh.advertise<std_msgs::Float64>("contact_event_out", 1);
   pub_controller_status_ = nh.advertise<std_msgs::String>("current_controller_out", 1);
+  pub_position           = nh.advertise<geometry_msgs::PointStamped>("position_out", 1);
+  pub_internal_wrench_    = nh.advertise<std_msgs::Float64MultiArray>("internal_wrench_out", 1);
+
+  // | ------------------------- timer ---------------------------- |
 
   timer_compute_wrench_            = nh.createTimer(ros::Rate(rate_compute_wrench_),&ExternalWrenchEstimator::timerComputeWrench,this);
   timer_publish_controller_status_ = nh.createTimer(ros::Duration(1.0), &ExternalWrenchEstimator::timerPublishControllerStatus, this);
+  contact_point_timer_ = nh.createTimer(ros::Duration(0.02), &ExternalWrenchEstimator::timerCheckControllerAndSendPoint, this, false, false);
+
+  // | ----------------------- parameters sanity check ------------------------ |
 
   bool enable_debug_switch = false;
   nh.param("enable_debug_switch", enable_debug_switch, false);
 
   if (enable_debug_switch) {
     timer_debug_switch_ = nh.createTimer(ros::Duration(25.0), &ExternalWrenchEstimator::timerDebugSwitch, this, true);  // oneshot=true
+    
   }
 
   // | ---------------------- Allocation matrix scaling ----------------------- |
@@ -253,26 +287,48 @@ void ExternalWrenchEstimator::onInit() {
 
   Eigen::Matrix<double, 4, 8> base_allocation = allocation_matrix_;
   for (int i = 0; i < 4; ++i) {
-      allocation_matrix_.row(i) = allocation_matrix_.row(i) * scaling(i);
+      allocation_matrix_.row(i) = base_allocation.row(i) * scaling(i);
   }
-  
 
+  // | --------------------------- Controller switch --------------------------- |
+
+  switch_controller_client_ = nh_.serviceClient<mrs_msgs::String>("/uav1/control_manager/switch_controller");
+
+  // | ------------------------- uav state subscriber -------------------------- |
+ 
   ROS_INFO("[ExternalWrenchEstimator]: Initialized");
   is_initialized_ = true;
 }
 
 //}
 
-/* //{ timer() */
+/* //{ timerComputeWrench(const ros::TimerEvent& te) */
 
 void ExternalWrenchEstimator::timerComputeWrench(const ros::TimerEvent& te) {
+
+  if (sh_switch_command_.hasMsg() && sh_switch_command_.getMsg()->data == true && sh_control_diagnostics_.getMsg()->active_controller != "MpcController") {
+    static ros::ServiceClient switch_controller_client = 
+    ros::NodeHandle().serviceClient<mrs_msgs::String>("/uav1/control_manager/switch_controller");
+    mrs_msgs::String srv;
+    srv.request.value = "MpcController";
+    if (switch_controller_client.call(srv)) {
+      ROS_INFO_STREAM("[ExternalWrenchEstimator]: Successfully switched to MpcController");
+    } else {
+      ROS_ERROR_STREAM("[ExternalWrenchEstimator]: Failed to switch controller");
+    }
+  }
+
   std::vector<double> speeds(8, 0.0);
 
   // | ------------ check if all motor speed messages are received ------------ |
+  //double alpha = 0.95;
   for (int i = 0; i < 8; ++i) {
     if (sh_motor_speeds_[i].hasMsg()) {
       double velocity = sh_motor_speeds_[i].getMsg()->data;
-      speeds[i] = velocity * velocity * 1800;  // square the speed to get the thrust
+      speeds[i] = velocity * velocity * 100 * 100; 
+      //double thrust = velocity * velocity * 100 * 100; 
+      //filtered_speeds[i] = alpha * filtered_speeds[i] + (1.0 - alpha) * thrust;
+      //speeds[i] = filtered_speeds[i];
     } else {
       ROS_WARN_THROTTLE(1.0, "[ExternalWrenchEstimator]: Not received motor speed msg since node launch.");
       return;
@@ -282,6 +338,13 @@ void ExternalWrenchEstimator::timerComputeWrench(const ros::TimerEvent& te) {
   // | ------------------- compute the internal wrench ---------------------- |
 
   wrench = allocation_matrix_ * Eigen::Map<Eigen::VectorXd>(speeds.data(), speeds.size());
+  wrench[3] += 2; //offset notce during the simulation
+  std_msgs::Float64MultiArray iw_msg;
+  iw_msg.data.resize(4);
+  for (int i = 0; i < 4; ++i) {
+    iw_msg.data[i] = wrench[i];
+  }
+  pub_internal_wrench_.publish(iw_msg);
 
   // | ------------------- aquire odometry and IMU data -------------------- |
 
@@ -316,7 +379,6 @@ void ExternalWrenchEstimator::timerComputeWrench(const ros::TimerEvent& te) {
     imu_msg->linear_acceleration.x,
     imu_msg->linear_acceleration.y,
     imu_msg->linear_acceleration.z);
-
   // | -------------------------- get dt ------------------------------- |
 
   double dt = 0.01;
@@ -327,9 +389,10 @@ void ExternalWrenchEstimator::timerComputeWrench(const ros::TimerEvent& te) {
   
   // | --------- Force estimation (acceleration-based) ------------------- |
 
-  Eigen::Vector3d a_corrected = R.transpose() * (a - gravity_);
+  //Eigen::Vector3d a_corrected = R.transpose() * (a - gravity_);
+  Eigen::Vector3d a_corrected = a;
   Eigen::Vector3d f_body        (0, 0, wrench[3]);
-  Eigen::Vector3d f           = R * f_body - mass_ * a_corrected;
+  Eigen::Vector3d f           = mass_ * a_corrected - f_body;
   f_ext_hat_                 += K_I_f_ * (f - f_ext_hat_) * dt;
 
   // | ------------- Force HP and LP filter ----------------------------- |
@@ -373,7 +436,7 @@ void ExternalWrenchEstimator::timerComputeWrench(const ros::TimerEvent& te) {
     wrench_msg.data[i + 3] = m_ext_hat_(i);
   }
   pub_wrench_.publish(wrench_msg);
-  ROS_INFO_THROTTLE(1.0, "[ExternalWrenchEstimator]: Published yaw: %.2f", odom_msg->pose.pose.orientation.z);
+  ROS_INFO_THROTTLE(1.0, "[ExternalWrenchEstimator]: Published yaw: %.2f", mrs_lib::AttitudeConverter(odom_msg->pose.pose.orientation).getYaw());
 
   // | --- Publish both force and moment estimates in the same plot --- |
 
@@ -412,56 +475,68 @@ void ExternalWrenchEstimator::timerComputeWrench(const ros::TimerEvent& te) {
   static Eigen::Vector3d last_collision_point = Eigen::Vector3d::Zero();
 
   std_msgs::Float64 contact_msg;
+  Eigen::Vector3d r_body(
+      uav_state_.pose.position.x,
+      uav_state_.pose.position.y,
+      uav_state_.pose.position.z);
 
-  if ((abs(m_ext_hat_hp_.z()) > 1.0 || abs(f_ext_hat_hp_.norm()) > 10.0) && !collision_active) {
+  ROS_INFO_THROTTLE(1.0, "[ExternalWrenchEstimator]: Drone position: (%.2f, %.2f, %.2f)", 
+    r_body.x(), r_body.y(), r_body.z());
+
+  geometry_msgs::PointStamped pos_msg;
+  pos_msg.header.stamp = ros::Time::now();
+  pos_msg.header.frame_id = "uav1/world_origin";
+  pos_msg.point.x = r_body.x();
+  pos_msg.point.y = r_body.y();
+  pos_msg.point.z = r_body.z();
+  pub_position.publish(pos_msg);
+
+  if ((abs(m_ext_hat_hp_.z()) > 1.0 || abs(f_ext_hat_hp_.head<2>().norm()) > 5.0) && !collision_active) {
 
     collision_active = true;
 
-    // | --------------- Log the collision event --------------------- |
-    auto diag_msg = sh_control_diagnostics_.getMsg();
-    std_msgs::String msg;
-    msg.data = diag_msg->active_controller;
-    if (msg.data != "BumpTolerantController" && msg.data != "EmergencyController") {
-      static ros::ServiceClient switch_controller_client = 
-      ros::NodeHandle().serviceClient<mrs_msgs::String>("/uav1/control_manager/switch_controller");
-      mrs_msgs::String srv;
-      srv.request.value = "BumpTolerantController";
-      if (switch_controller_client.call(srv)) {
-        ROS_INFO_STREAM("[ExternalWrenchEstimator]: Successfully switched to bump_tolerant_controller");
-      } else {
-        ROS_ERROR_STREAM("[ExternalWrenchEstimator]: Failed to switch controller");
+    {
+      std::lock_guard<std::mutex> lock(controller_switch_mutex_);
+      
+      auto diag_msg = sh_control_diagnostics_.getMsg();
+      std_msgs::String msg;
+      msg.data = diag_msg->active_controller;
+      
+      if (msg.data != "BumpTolerantController" && msg.data != "EmergencyController") {
+        Eigen::Vector3d contact_point_body = estimateCollisionPoint(f_ext_hat_hp_, m_ext_hat_hp_, R, r_body, odom_msg->header.frame_id);
+        
+        pending_contact_point_ = contact_point_body;
+        contact_point_sent_ = false;
+        controller_switch_pending_ = true;
+        controller_switch_time_ = ros::Time::now();
+
+        contact_point_timer_.start();
+        
+        mrs_msgs::String srv;
+        srv.request.value = "BumpTolerantController";
+        
+        if (switch_controller_client_.call(srv)) {
+          ROS_INFO("[ExternalWrenchEstimator]: Requested switch to BumpTolerantController");
+        } else {
+          ROS_ERROR("[ExternalWrenchEstimator]: Failed to switch controller");
+          controller_switch_pending_ = false;
+        }
+        
+        static ros::ServiceClient stop_wp = ros::NodeHandle().serviceClient<std_srvs::Trigger>("/uav1/example_waypoint_flier/stop_waypoints_following_in");
+        std_srvs::Trigger srv_stop;
+        stop_wp.call(srv_stop);
       }
-
-      static ros::ServiceClient stop_wp = ros::NodeHandle().serviceClient<std_srvs::Trigger>("/uav1/example_waypoint_flier/stop_waypoints_following_in");
-      std_srvs::Trigger srv_stop;
-      stop_wp.call(srv_stop);
+      
+      contact_msg.data = 10.0;
+      pub_contact_event_.publish(contact_msg);
     }
-
-    // | --------------- Estimate the collision point --------------------- |
-    Eigen::Vector3d r_body(
-      odom_msg->pose.pose.position.x,
-      odom_msg->pose.pose.position.y,
-      odom_msg->pose.pose.position.z);
-    last_collision_point = estimateCollisionPoint(f_ext_hat_hp_, m_ext_hat_hp_, R, r_body, odom_msg->header.frame_id);
-
-    contact_msg.data = 10.0;  // Pubblish 3 when contact is detected
-    pub_contact_event_.publish(contact_msg);
   }
   else {
     collision_active = false;
-    contact_msg.data = 0.0;    // Pubblica 0 when no contact is detected
+    contact_msg.data = 0.0;    // Publish 0 when no contact is detected
     pub_contact_event_.publish(contact_msg);
     ROS_INFO_THROTTLE(10.0, "[ExternalWrenchEstimator]: No contact detected");
   }
-
-  // Publish the contact point as a PointStamped message
-  geometry_msgs::PointStamped contact_pt_msg;
-  contact_pt_msg.header.stamp = ros::Time::now();
-  contact_pt_msg.header.frame_id = "uav1/world_origin";
-  contact_pt_msg.point.x = last_collision_point.x();
-  contact_pt_msg.point.y = last_collision_point.y();
-  contact_pt_msg.point.z = last_collision_point.z();
-  pub_contact_pt_.publish(contact_pt_msg);
 
   // | --------------- Pub marker for collision detection --------------- |
 
@@ -517,47 +592,74 @@ void ExternalWrenchEstimator::timerPublishControllerStatus(const ros::TimerEvent
 
 void ExternalWrenchEstimator::timerDebugSwitch(const ros::TimerEvent& /*te*/) {
   
-  ROS_WARN_STREAM("[ExternalWrenchEstimator]: DEBUG - 10 seconds passed, switching to bump controller NOW!");
-  ros::Duration(30).sleep();  // Sleep for 100ms to ensure the switch is processed correctly
+  ROS_WARN("[ExternalWrenchEstimator]: DEBUG - 10 seconds passed, switching to bump controller NOW!");
   
-  // Switch controller using SERVICE
-  static ros::ServiceClient switch_controller_client = 
-    ros::NodeHandle().serviceClient<mrs_msgs::String>("/uav1/control_manager/switch_controller");
-  
-  mrs_msgs::String srv;
-  srv.request.value = "BumpTolerantController";
-  
-  if (switch_controller_client.call(srv)) {
-    ROS_INFO_STREAM("[ExternalWrenchEstimator]: DEBUG - Successfully switched to bump_tolerant_controller");
-    ros::Duration(0.5).sleep();
-  } else {
-    ROS_ERROR_STREAM("[ExternalWrenchEstimator]: DEBUG - Failed to switch controller");
-  }
-  auto diag_msg = sh_control_diagnostics_.getMsg();
-  
-  std_msgs::String msg;
-  msg.data = diag_msg->active_controller;
-  if (msg.data != "BumpTolerantController") {
-    ROS_ERROR_STREAM("[ExternalWrenchEstimator]: DEBUG - Controller switch failed, current controller: " << msg.data);
-  } else {
-  ROS_WARN_STREAM("[ExternalWrenchEstimator]: DEBUG - Switch completed!"); 
- }
+  {
+    std::lock_guard<std::mutex> lock(controller_switch_mutex_);
+    
+    pending_contact_point_ = Eigen::Vector3d(0.335, -0.335, 0.0);
+    contact_point_sent_ = false;
+    controller_switch_pending_ = true;
+    controller_switch_time_ = ros::Time::now();
 
-  // Stop waypoint flier for testing
-  static ros::ServiceClient stop_wp = ros::NodeHandle().serviceClient<std_srvs::Trigger>("/uav1/example_waypoint_flier/stop_waypoints_following_in");
-  std_srvs::Trigger srv_stop;
-  if (stop_wp.call(srv_stop)) {
-    ROS_INFO_STREAM("[ExternalWrenchEstimator]: DEBUG - Stopped waypoint flier");
-  } else {
-    ROS_WARN_STREAM("[ExternalWrenchEstimator]: DEBUG - Failed to stop waypoint flier");
-  }
-  
-  // Publish contact event for testing
-  std_msgs::Float64 contact_msg;
-  contact_msg.data = 5.0;  // Debug value - different from collision (3.0)
-  pub_contact_event_.publish(contact_msg);
-  
+    contact_point_timer_.start();
+    
+    mrs_msgs::String srv;
+    srv.request.value = "BumpTolerantController";
+    
+    if (switch_controller_client_.call(srv)) {
+      ROS_INFO("[ExternalWrenchEstimator]: DEBUG - Requested switch to BumpTolerantController");
+    } else {
+      ROS_ERROR("[ExternalWrenchEstimator]: DEBUG - Failed to switch controller");
+      controller_switch_pending_ = false;
+    }
 
+    static ros::ServiceClient stop_wp = ros::NodeHandle().serviceClient<std_srvs::Trigger>("/uav1/example_waypoint_flier/stop_waypoints_following_in");
+    std_srvs::Trigger srv_stop;
+    stop_wp.call(srv_stop);
+    
+    std_msgs::Float64 contact_msg;
+    contact_msg.data = 5.0;
+    pub_contact_event_.publish(contact_msg);
+  }
+}
+
+//}
+
+/* //{ timerCheckControllerAndSendPoint() */
+
+void ExternalWrenchEstimator::timerCheckControllerAndSendPoint(const ros::TimerEvent& /*te*/) {
+  std::lock_guard<std::mutex> lock(controller_switch_mutex_);
+  
+  if (controller_switch_pending_ && !contact_point_sent_) {
+    if (sh_control_diagnostics_.hasMsg() && 
+        sh_control_diagnostics_.getMsg()->active_controller == "BumpTolerantController") {
+      
+      if ((ros::Time::now() - controller_switch_time_).toSec() > 0.05) {
+        geometry_msgs::PointStamped contact_pt_msg;
+        contact_pt_msg.header.stamp = ros::Time::now();
+        contact_pt_msg.header.frame_id = "uav1/world_origin";
+        contact_pt_msg.point.x = pending_contact_point_.x();
+        contact_pt_msg.point.y = pending_contact_point_.y();
+        contact_pt_msg.point.z = pending_contact_point_.z();
+        
+        pub_contact_pt_.publish(contact_pt_msg);
+        
+        ROS_INFO("[ExternalWrenchEstimator]: Sent contact point: [%.3f, %.3f, %.3f]", 
+                 pending_contact_point_.x(), pending_contact_point_.y(), pending_contact_point_.z());
+        
+        contact_point_sent_ = true;
+        controller_switch_pending_ = false;
+
+        contact_point_timer_.stop();
+      }
+    } else if ((ros::Time::now() - controller_switch_time_).toSec() > 2.0) {
+      ROS_WARN("[ExternalWrenchEstimator]: Timeout waiting for BumpTolerantController!");
+      controller_switch_pending_ = false;
+
+      contact_point_timer_.stop();
+    }
+  }
 }
 
 //}
@@ -602,17 +704,30 @@ Eigen::Vector3d ExternalWrenchEstimator::estimateCollisionPoint(const Eigen::Vec
 
   double alpha_start = -2.0 * drone_radius_;
   double alpha_end   = 0.0;
-  double alpha_step  = 0.01;
+  double alpha_step  = 0.02;
+  double tol         = 0.01;
+
+  Eigen::Vector3d      rc;
+  Eigen::Vector3d      rc_world;
+  geometry_msgs::Point p;
+
+  Eigen::Vector2d rc_dir_xy = rc_dir.head<2>();
+  Eigen::Vector2d f_hat_xy  = f_hat.head<2>();
 
   for (double alpha = alpha_start; alpha <= alpha_end; alpha += alpha_step) {
-    Eigen::Vector3d rc = rc_dir + alpha * f_hat;
-    //Eigen::Vector3d rc = rc_dir - alpha * f_hat; VERIFY THE SIGN
+    //rc = rc_dir - alpha * f_hat;
+    //rc = rc_dir + alpha * f_hat; VERIFY THE SIGN
+    
+    Eigen::Vector2d rc_xy = rc_dir_xy + alpha * f_hat_xy;
+    Eigen::Vector3d rc(rc_xy.x(), rc_xy.y(), 0.0);
     double z_cyl = rc.z() + 0.0195;
+    double r_xy = rc.head<2>().norm();
+    //ROS_INFO_STREAM("[ExternalWrenchEstimator][DEBUG]: alpha=" << alpha << " rc=" << rc.transpose() << " r_xy=" << r_xy << " z_cyl=" << z_cyl);
 
     // | --------------- Create the line marker ------------------------ |
 
-    Eigen::Vector3d rc_world = R * rc + r_body;
-    geometry_msgs::Point p;
+    rc_world = R * rc + r_body;
+    rc_world.z() = r_body.z() + 0.0195;
     p.x = rc_world.x();
     p.y = rc_world.y();
     p.z = rc_world.z();
@@ -620,9 +735,14 @@ Eigen::Vector3d ExternalWrenchEstimator::estimateCollisionPoint(const Eigen::Vec
 
     // | --------------- Check if the point is within the cylinder --------------- |
 
-    if (rc.head<2>().norm() <= drone_radius_ && std::abs(z_cyl) <= 0.155/2.0) {
+    /*if (rc.head<2>().norm() <= drone_radius_ && std::abs(z_cyl) <= 0.155/2.0) {
       Eigen::Vector3d rc_world = R * rc + r_body;
       ROS_INFO_STREAM("[ExternalWrenchEstimator][DEBUG]: Found collision point at alpha=" << alpha << ", rc (body): " << rc.transpose());
+      ROS_INFO_STREAM("[ExternalWrenchEstimator][DEBUG]: rc_world: " << rc_world.transpose());
+      pub_collision_marker_.publish(line_marker);*/
+
+    if (std::abs(rc_xy.norm() - drone_radius_) < tol) {
+      ROS_INFO_STREAM("[ExternalWrenchEstimator][DEBUG]: Found horizontal collision point at alpha=" << alpha << ", rc (body): " << rc.transpose());
       ROS_INFO_STREAM("[ExternalWrenchEstimator][DEBUG]: rc_world: " << rc_world.transpose());
       pub_collision_marker_.publish(line_marker);
 
@@ -672,7 +792,7 @@ Eigen::Vector3d ExternalWrenchEstimator::estimateCollisionPoint(const Eigen::Vec
       cyl_marker.color.b            = 0.0;
       pub_collision_marker_.publish(cyl_marker);
 
-      return rc_world;
+      return rc;
     }
   }
   ROS_WARN_STREAM("[ExternalWrenchEstimator][DEBUG]: No valid collision point found on convex hull.");
@@ -680,8 +800,8 @@ Eigen::Vector3d ExternalWrenchEstimator::estimateCollisionPoint(const Eigen::Vec
   return Eigen::Vector3d::Zero();
 
 }
-
 //}
+
 
 } // namespace external_wrench_estimator
 

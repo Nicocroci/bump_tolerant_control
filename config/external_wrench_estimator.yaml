@@ -16,7 +16,7 @@ moment_constant: 0.07
 
 #Rate of the wrench estimator
 rate:
-  compute_wrench: 20 # [Hz]
+  compute_wrench: 100 # [Hz]
 
 #Mass of the UAV
 mass: 7.5 # [kg]

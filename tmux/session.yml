@@ -17,7 +17,7 @@ windows:
       panes:
         - waitForRos; export GAZEBO_PLUGIN_PATH=/opt/ros/noetic/lib:$GAZEBO_PLUGIN_PATH; roslaunch mrs_uav_gazebo_simulation simulation.launch world_file:=/home/nicolo/test_world gui:=true
         #- waitForRos; export GAZEBO_PLUGIN_PATH=/opt/ros/noetic/lib:$GAZEBO_PLUGIN_PATH; roslaunch mrs_uav_gazebo_simulation simulation.launch world_name:=grass_plane gui:=true
-        - waitForGazebo; rosservice call /mrs_drone_spawner/spawn "1 --$UAV_TYPE"
+        - waitForGazebo; rosservice call /mrs_drone_spawner/spawn "1 --$UAV_TYPE --pos 0.0 0.0 0.3 0.0"
         - waitForControl; gz camera -c gzclient_camera -f $UAV_NAME; history -s gz camera -c gzclient_camera -f $UAV_NAME
   - status:
       layout: tiled
@@ -39,7 +39,7 @@ windows:
       layout: tiled
       panes:
         - waitForHw; roslaunch mrs_uav_autostart automatic_start.launch
-        - 'waitForControl; rosservice call /$UAV_NAME/hw_api/arming 1; sleep 2; rosservice call /$UAV_NAME/hw_api/offboard; sleep 15; rosservice call /$UAV_NAME/control_manager/goto "goal: [0.0, 0.0, 1.5, 0.0]"'
+        - 'waitForControl; rosservice call /$UAV_NAME/hw_api/arming 1; sleep 2; rosservice call /$UAV_NAME/hw_api/offboard'
   - imu:
       layout: tiled
       panes:
@@ -51,7 +51,7 @@ windows:
   - goto:
       layout: tiled
       panes:
-        - 'history -s rosservice call /$UAV_NAME/control_manager/goto \"goal: \[-30.0, 30.0, 1.5, 0.0\]\"'
+        - 'history -s rosservice call /$UAV_NAME/control_manager/goto \"goal: \[-30.0, 30.0, 1.35, 0.0\]\"'
   - example_waypoint_flier:
       layout: tiled
       panes:

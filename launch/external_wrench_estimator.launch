@@ -35,7 +35,8 @@
       <remap from="~motor_speed_in7" to="motor_speed/7"/>
       <remap from="~odom_uav_in"     to="hw_api/odometry"/>
       <remap from="~imu_in"          to="hw_api/imu"/>
-
+      <remap from="~switch_cmd_in"   to="control_manager/bump_tolerant_controller/switch_controller_command"/>
+      <remap from="~gps_baro_in"     to="estimation_manager/gps_baro/odom"/>
 
       <!-- Publishers (note that the topic names will also be remapped using the namespace as a prefix) -->
       <remap from="~external_wrench_estimation_out"       to="external_wrench_estimator/ext_wrench" />
@@ -46,6 +47,8 @@
       <remap from="~collision_point_marker_out"           to="external_wrench_estimator/collision_point_marker" />
       <remap from="~contact_event_out"                    to="external_wrench_estimator/contact_event" />
       <remap from="~current_controller_out"               to="external_wrench_estimator/current_controller" />
+      <remap from="~position_out"                         to="external_wrench_estimator/position" />
+      <remap from="~internal_wrench_out"                  to="external_wrench_estimator/internal_wrench" />
 
     </node>
 
