@@ -169,14 +169,14 @@ private:
   WallInteractionState wall_interaction_state_;
 
   struct YawDataPoint {
-  double yaw_value;
-  double weight;
-  ros::Time timestamp;
-};
+    double yaw_value;
+    double weight;
+    ros::Time timestamp;
+  };
 
-std::deque<YawDataPoint> yaw_data_points_;
-const size_t max_yaw_points_ = 200;
-double accumulated_movement_weight_ = 0.0;
+  std::deque<YawDataPoint> yaw_data_points_;
+  const size_t max_yaw_points_ = 200;
+  double accumulated_movement_weight_ = 0.0;
 
   Eigen::Vector3d wall_normal_inertial_estimate_;
   bool            has_wall_normal_estimate_ = false;
@@ -247,7 +247,7 @@ double accumulated_movement_weight_ = 0.0;
   Eigen::Vector3d tangent_ref_pos = Eigen::Vector3d::Zero();
   Eigen::Vector3d tangent_ref_pos_B = Eigen::Vector3d::Zero();
   Eigen::Vector3d tangent_ref_vel;
-  bool first_tangent_iteration_ = true;
+  bool first_tangent_iteration_ = false;
 
   double desired_altitude_;
 
@@ -276,6 +276,22 @@ double accumulated_movement_weight_ = 0.0;
   Eigen::Matrix3d R_N_to_W = Eigen::Matrix3d::Identity();
 
   double wall_yaw;
+
+  double contact_velocity_magnitude;
+
+  Eigen::Vector3d impedance_vel_error_B_;
+
+  double wall_yaw_weighted_sum = 0.0;
+  double wall_yaw_total_weight = 0.0;
+
+  struct WallPoint {
+    Eigen::Vector3d position;
+    double distance_to_wall;
+    double weight;
+    double q;
+  };
+  std::vector<WallPoint> wall_points;
+  const size_t max_wall_points = 50;
 };
 
 /* BumpTolerantController() constructor //{ */
@@ -1194,8 +1210,8 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
     // 1. Calcola direzione impedenza
     double wall_yaw = std::atan2(wall_tangent.y(), wall_tangent.x());
     double yaw_error = current_yaw - wall_yaw;
-    //double contact_velocity_magnitude = 0.6/ (1.0 + std::exp(2 * (std::abs(yaw_error) - 0.240))); // m/s, velocità di impedence desiderata
-    double contact_velocity_magnitude = 0.6;
+    //contact_velocity_magnitude = 0.6/ (1.0 + std::exp(2 * (std::abs(yaw_error) - 0.240))); // m/s, velocità di impedence desiderata
+    contact_velocity_magnitude = 0.6;
     Eigen::Vector3d normal_ref_pos_W_;
     Eigen::Vector3d normal_ref_vel_W_;
     Eigen::Vector3d normal_component_W_;
@@ -1218,7 +1234,7 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
                         uav_vel_W.x(),           uav_vel_W.y(),           uav_vel_W.z());
     }
     Eigen::Vector3d impedance_pos_error_W_ = normal_ref_pos_W_ - uav_pos_W;
-    Eigen::Vector3d impedance_vel_error_B_ = Eigen::Vector3d(0, contact_velocity_magnitude - uav_vel_B.y(), 0);
+    impedance_vel_error_B_ = Eigen::Vector3d(0, contact_velocity_magnitude - uav_vel_B.y(), 0);
     Eigen::Vector3d impedance_vel_error_W_ = R_B_to_W * impedance_vel_error_B_;
 
     Eigen::Vector3d uav_acc_W(
@@ -1386,12 +1402,8 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
     
     sliding_impedance_cycle_count_++;
 
-    // Imposta il feedforward rate attorno a z ogni 3 cicli
+    
     double yaw_rate_feedforward = 0.0;
-    if (sliding_impedance_cycle_count_ % 3 == 0) {
-      yaw_rate_feedforward = -6; // rad/s, negative = clockwise
-      yaw_rate_feedforward = 0;
-    }
 
     last_control_output_.control_output = attitude_cmd_slide;
     last_control_output_.desired_orientation = Eigen::Quaterniond(
@@ -1456,9 +1468,9 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
     // 1. Computes the direction of impedance
     double wall_yaw = std::atan(m_wall);
     double yaw_error = wall_yaw - current_yaw;
-    //double contact_velocity_magnitude = 0.6/ (1.0 + std::exp(2 * (std::abs(yaw_error) - 0.240)));
+    contact_velocity_magnitude = 0.6/ (1.0 + std::exp(2 * (std::abs(yaw_error) - 0.240)));
     yaw_error = std::fmod(yaw_error + M_PI, 2*M_PI) - M_PI;
-    double contact_velocity_magnitude = 0.8/(1.0 + std::exp(2 * (std::abs(yaw_error) - 0.12)));
+    contact_velocity_magnitude = 0.8/(1.0 + std::exp(2 * (std::abs(yaw_error) - 0.12)));
     Eigen::Vector3d normal_ref_pos_W_;
     Eigen::Vector3d normal_ref_vel_W_;
     Eigen::Vector3d normal_component_W_;
@@ -1560,7 +1572,7 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
 
     // 1.3 Impedance errors
     Eigen::Vector3d impedance_pos_error_W_ = normal_ref_pos_W_ - uav_pos_W;
-    Eigen::Vector3d impedance_vel_error_B_ = Eigen::Vector3d(0, contact_velocity_magnitude - uav_vel_B.y(), 0);
+    impedance_vel_error_B_ = Eigen::Vector3d(0, contact_velocity_magnitude - uav_vel_B.y(), 0);
     Eigen::Vector3d impedance_vel_error_W_ = R_B_to_W * impedance_vel_error_B_;
 
     Eigen::Vector3d impedance_pos_error_B_ = R_B_to_W.transpose() * impedance_pos_error_W_;
@@ -1790,8 +1802,10 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
     double yaw_rate_current = uav_state.velocity.angular.z;
     auto ext_torque = sh_ext_torque_.getMsg();
     double ext_mz = ext_torque->z;
-    double desired_yaw_rate = kp_yaw * yaw_error - kd_yaw * yaw_rate_current - ext_mz;
-
+    double desired_yaw_rate = 0.0;
+    if (std::abs(yaw_error)>0.1){
+      desired_yaw_rate = kp_yaw * yaw_error - kd_yaw * yaw_rate_current - ext_mz;
+    }
     // Limita il yaw rate
     desired_yaw_rate = std::clamp(desired_yaw_rate, -1.0, 1.0);
     ROS_INFO_THROTTLE(0.1, "[%s][SLIDING_CYLINDER]: Desired yaw rate: [%.3f], current yaw rate: [%.3f]",
@@ -1857,7 +1871,10 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
 
     // 0. Verify if the wall is still present
     std_msgs::Bool switch_msg;
-    if (uav_state.pose.position.y > uav_state.pose.position.x * m_wall + q_wall + 5) {
+    bool mooving = std::signbit(uav_vel_W.y()) == std::signbit(contact_velocity_magnitude) &&
+                   std::abs(uav_vel_W.y()) > 0.5 * contact_velocity_magnitude;
+
+    if (uav_state.pose.position.y > uav_state.pose.position.x * m_wall + q_wall + 5.0 && ready_to_sliding_ && mooving) { //(&&(ready_to_sliding_ || wall_not_found))
       switch_msg.data = true;
     } else switch_msg.data = false;
     pub_switch_command_.publish(switch_msg);
@@ -1869,71 +1886,132 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
     double yaw_error = wall_yaw - current_yaw;
     yaw_error = std::fmod(yaw_error + M_PI, 2*M_PI) - M_PI;
 
-    if (!first_sliding_iteration_ && !ready_to_sliding_) {
-      Eigen::Vector3d delta_pos_W = uav_pos_W - previous_uav_pos_W_;
-      double delta_x_B_ = (R_B_to_W.transpose() * delta_pos_W).x();
+    double wall_estimation_weight;
 
-      double tangential_force = (delta_x_B_/normal_ref_pos_B_.y());
+    if (!first_sliding_iteration_) {
+      double velocity_weight = 1.0 / (1.0 + std::abs(uav_vel_B.y()) * 5.0);
+      double rotation_stability = 1.0 / (1.0 + 10.0 * std::abs(uav_state.velocity.angular.z));
 
-      double weight = 1.0 + 5.0 * std::abs(tangential_force);
-      weight = std::min(weight, 10.0);
+      wall_estimation_weight = velocity_weight * rotation_stability;
 
-      YawDataPoint new_point;
-      new_point.yaw_value = current_yaw;
-      new_point.weight = weight;
-      new_point.timestamp = ros::Time::now();
+      ROS_INFO_THROTTLE(0.1, "[%s][SLIDING_SQUARE]: Wall estimation weight: %.3f, velocity weight: %.3f, rotation stability: %.3f, vecity: %.3f, angular velocity: [%.3f]",
+              name_.c_str(), wall_estimation_weight, velocity_weight, rotation_stability, uav_vel_B.y(), uav_state.velocity.angular.z);
 
-      if (yaw_data_points_.size() >= max_yaw_points_) {
-        accumulated_movement_weight_ -= yaw_data_points_.front().weight;
-        yaw_data_points_.pop_front();
+      wall_yaw_weighted_sum += current_yaw * wall_estimation_weight;
+      wall_yaw_total_weight += wall_estimation_weight;
+
+      if(wall_yaw_total_weight > 50.0 && !first_tangent_iteration_) {
+        first_tangent_iteration_ = true;
+        ready_to_sliding_ = true;
       }
-      
-      yaw_data_points_.push_back(new_point);
-      accumulated_movement_weight_ += weight;
 
-      ROS_INFO_THROTTLE(0.1, "[%s][SLIDING_SQUARE]: Tangential force: %.5f, delta_x_body: %.5f",
-                        name_.c_str(), tangential_force, delta_x_B_);
-
-      if (slidig_impedance_data_.size() >= max_size_sid) {
-        slidig_impedance_data_.pop_front();
-      }
-      double delta_y_B_ = (R_B_to_W.transpose() * delta_pos_W).y();
-      slidig_impedance_data_.push_back(delta_x_B_ + delta_y_B_);
-      int n = slidig_impedance_data_.size();
-
-      if (n == static_cast<int>(max_size_sid)) {
-        double sdi_sum = 0.0;
-        for (int i = 0; i < n; ++i) {
-          sdi_sum += slidig_impedance_data_[i];
+      if (wall_yaw_total_weight > 50.0) {
+        double estimated_wall_yaw = wall_yaw_weighted_sum / wall_yaw_total_weight;
+        if (std::abs(estimated_wall_yaw - current_yaw) < 3* M_PI / 180.0) {
+          wall_yaw = current_yaw;
+        } else {
+          wall_yaw = estimated_wall_yaw;
         }
-        if (sdi_sum/n < 0.05 && std::abs(uav_vel_B.y()) < 0.05) {
-          ready_to_sliding_ = true;
-          ROS_WARN("[%s][SLIDING_SQUARE]: Ready to sliding, m_wall: %.3f, after %d itarations",
-                   name_.c_str(), m_wall, iteration_counter_);
-        }
+        m_wall = std::tan(wall_yaw);
+        ROS_INFO_THROTTLE(0.1, "[%s][SLIDING_SQUARE]: Updated wall yaw: %.3f rad (%.1f deg), actual yaw : %.3f, m_wall: %.3f",
+                name_.c_str(), wall_yaw, wall_yaw * 180.0 / M_PI,current_yaw, m_wall);
+      } else {
+        wall_yaw = current_yaw;
+        m_wall = std::tan(wall_yaw);
+        ROS_INFO_THROTTLE(0.1, "[%s][SLIDING_SQUARE]: Wall yaw not updated yet, total weight: %.2f", name_.c_str(), wall_yaw_total_weight);
       }
+
       iteration_counter_++;
 
     }else if (first_sliding_iteration_ ) first_sliding_iteration_= false;
 
     if (ready_to_sliding_ && first_tangent_iteration_) {
-      if (!yaw_data_points_.empty() && accumulated_movement_weight_ > 0.0) {
-        double weighted_sum = 0.0;
-        for (const auto& point : yaw_data_points_) {
-          weighted_sum += point.yaw_value * point.weight;
-        }
-        double weighted_average_yaw = weighted_sum / accumulated_movement_weight_;
-        wall_yaw = weighted_average_yaw;
-        m_wall = std::tan(wall_yaw);
-        
-        ROS_INFO("[%s][SLIDING_SQUARE]: Computed weighted average yaw: %.3f rad (%.1f deg) from %zu points, m_wall: %.3f",
-                name_.c_str(), weighted_average_yaw, weighted_average_yaw * 180.0 / M_PI, yaw_data_points_.size(), m_wall);
-      } else {
-        // Fallback al metodo originale
-        m_wall = std::tan(current_yaw);
-        ROS_WARN("[%s][SLIDING_SQUARE]: No weighted yaw data available, using current yaw fallback", name_.c_str());
-      }
+      
       first_tangent_iteration_ = false;
+    }
+
+    if (ready_to_sliding_ && wall_estimation_weight > 0.8) {
+      double distance_to_wall = std::abs(uav_pos_W.y() - m_wall * uav_pos_W.x() - q_wall) / 
+                             std::sqrt(1.0 + m_wall * m_wall);
+      
+      if (wall_points.size() < 10) {
+        WallPoint new_point;
+        new_point.position = uav_pos_W;
+        new_point.distance_to_wall = distance_to_wall;
+        new_point.weight = wall_estimation_weight;
+        new_point.q = uav_pos_W.y() - std::tan(current_yaw) * uav_pos_W.x();
+        wall_points.push_back(new_point);
+        ROS_INFO_THROTTLE(0.1, "[%s][SLIDING_SQUARE]: Added new wall point: [%.3f, %.3f, %.3f], distance: %.3f, weight: %.3f",
+                name_.c_str(), uav_pos_W.x(), uav_pos_W.y(), uav_pos_W.z(), distance_to_wall, wall_estimation_weight);
+      }else if(wall_estimation_weight < wall_points.back().weight) {   
+        // Create a new wall point
+        WallPoint new_point;
+        new_point.position = uav_pos_W;
+        new_point.distance_to_wall = distance_to_wall;
+        new_point.weight = wall_estimation_weight;
+        new_point.q = uav_pos_W.y() - std::tan(current_yaw) * uav_pos_W.x();
+        ROS_INFO_THROTTLE(0.1, "[%s][SLIDING_SQUARE]: New wall point candidate: [%.3f, %.3f, %.3f], distance: %.3f, weight: %.3f",
+                name_.c_str(), uav_pos_W.x(), uav_pos_W.y(), uav_pos_W.z(), distance_to_wall, wall_estimation_weight);
+
+        if (distance_to_wall < wall_points.front().distance_to_wall) {
+          wall_points.front() = new_point;
+          //Recompute all the distances
+          q_wall = uav_pos_W.y() - m_wall * uav_pos_W.x();
+          for (auto& point : wall_points) {
+            point.distance_to_wall = std::abs(point.position.y() - m_wall * point.position.x() - q_wall) / 
+                                     std::sqrt(1.0 + m_wall * m_wall);
+          }
+        }
+        
+        // Add to collection and maintain only closest points
+        wall_points.push_back(new_point);
+        
+        // Sort by distance to wall (ascending)
+        std::sort(wall_points.begin(), wall_points.end(), 
+                  [](const WallPoint& a, const WallPoint& b) {
+                      return a.distance_to_wall < b.distance_to_wall;
+                  });
+        
+        // Keep only the 10 closest points
+        if (wall_points.size() > max_wall_points) {
+            wall_points.resize(max_wall_points);
+        }
+        
+        // When you're ready to use these points
+        if (wall_points.size() == max_wall_points) { // Need some minimum number for stability
+          // Calculate weighted average yaw from closest points
+          double close_points_yaw_sum = 0.0;
+          double close_points_weight_sum = 0.0;
+          
+          for (const auto& point : wall_points) {
+              // Calculate yaw from this point's position relative to current position
+              double point_yaw = std::atan2(
+                  point.position.y() - uav_pos_W.y(),
+                  point.position.x() - uav_pos_W.x()
+              );
+              
+              close_points_yaw_sum += point_yaw * point.weight;
+              close_points_weight_sum += point.weight;
+          }
+          
+          if (close_points_weight_sum > 0.0) {
+              double refined_wall_yaw = close_points_yaw_sum / close_points_weight_sum;
+              ROS_INFO_THROTTLE(0.1, "[%s][SLIDING_SQUARE]: Refined wall yaw from 10 closest points: %.3f rad", 
+                      name_.c_str(), refined_wall_yaw);
+          }
+        }
+      }else {
+        ROS_INFO_THROTTLE(0.1, "[%s][SLIDING_SQUARE]: Wall points collection is full, not adding new point.", name_.c_str());
+      } 
+    }else if (ready_to_sliding_) {
+      ROS_INFO_THROTTLE(0.1, "[%s][SLIDING_SQUARE]: Wall estimation weight too low: %.3f, not adding new point.", name_.c_str(), wall_estimation_weight);
+    }
+
+    //print all the wall points
+    for (const auto& point : wall_points) {
+      ROS_INFO_THROTTLE(0.1, "[%s][SLIDING_SQUARE]: Wall point: [%.3f, %.3f, %.3f], distance: %.3f, weight: %.3f, q: %.3f",
+                        name_.c_str(), point.position.x(), point.position.y(), point.position.z(),
+                        point.distance_to_wall, point.weight, point.q);
     }
 
     Eigen::Vector3d wall_tangent(1.0, m_wall, 0.0);
@@ -1948,7 +2026,7 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
     
 
     
-    double contact_velocity_magnitude = 0.8/(1.0 + std::exp(2 * (std::abs(yaw_error) - 0.349066))); // more than 20 deg
+    contact_velocity_magnitude = 0.8/(1.0 + std::exp(2 * (std::abs(yaw_error) - 0.349066))); // more than 20 deg
     Eigen::Vector3d normal_ref_pos_W_;
     Eigen::Vector3d normal_ref_vel_W_;
     Eigen::Vector3d normal_component_W_;
@@ -1984,7 +2062,7 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
 
     // 1.3 Impedance errors
     Eigen::Vector3d impedance_pos_error_W_ = normal_ref_pos_W_ - uav_pos_W;
-    Eigen::Vector3d impedance_vel_error_B_ = Eigen::Vector3d(0, contact_velocity_magnitude - uav_vel_B.y(), 0);
+    impedance_vel_error_B_ = Eigen::Vector3d(0, contact_velocity_magnitude - uav_vel_B.y(), 0);
     Eigen::Vector3d impedance_vel_error_W_ = R_B_to_W * impedance_vel_error_B_;
 
     Eigen::Vector3d impedance_pos_error_B_ = R_B_to_W.transpose() * impedance_pos_error_W_;
@@ -2041,7 +2119,7 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
     //sliding_tangent_inertial_cmd_ = wall_tangent;
     sliding_tangent_inertial_cmd_ = R_B_to_W.col(0);
 
-    double sliding_velocity_magnitude = -2.5* (1 / (1.0 + std::exp(10 * (std::abs(yaw_error) - 0.349066)))) * (1 / (1.0 + std::exp(10 * (std::abs(contact_velocity_magnitude - impedance_vel_error_B_.y()) - 0.4)))); // m/s
+    double sliding_velocity_magnitude = -2.5* (1 / (1.0 + std::exp(10 * (std::abs(yaw_error) - 0.349066)))) * (1 / (1.0 + std::exp(10 * (std::abs(uav_vel_B.y()) - 0.3)))); // m/s
     ROS_INFO_THROTTLE(0.1, "[%s][SLIDING_SQUARE]: Yaw reduction term: %.3f, normal reduction term: %.3f, sliding velocity magnitude: %.3f, velocity error: %.3f",
                       name_.c_str(),
                       (1 / (1.0 + std::exp(10 * (std::abs(yaw_error) - 0.349066)))),
@@ -2189,7 +2267,10 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
     double yaw_rate_current = uav_state.velocity.angular.z;
     auto ext_torque = sh_ext_torque_.getMsg();
     double ext_mz = ext_torque->z;
-    double desired_yaw_rate = kp_yaw * yaw_error - kd_yaw * yaw_rate_current - ext_mz;
+    double desired_yaw_rate = 0.0;
+    if (std::abs(yaw_error)>0.1){
+      desired_yaw_rate = kp_yaw * yaw_error - kd_yaw * yaw_rate_current - ext_mz;
+    }
 
     // Limita il yaw rate
     desired_yaw_rate = std::clamp(desired_yaw_rate, -1.0, 1.0);
