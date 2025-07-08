@@ -10,6 +10,7 @@
 
 /* for protecting variables from simultaneous by from multiple threads */
 #include <mutex>
+#include <queue>
 
 /* for writing and reading from streams */
 #include <fstream>
@@ -158,7 +159,8 @@ private:
   std::mutex controller_switch_mutex_;
   bool controller_switch_pending_ = false;
   bool contact_point_sent_ = false;
-  Eigen::Vector3d pending_contact_point_ = Eigen::Vector3d::Zero();
+  std::queue<Eigen::Vector3d> contact_points_queue_;
+  std::mutex queue_mutex_; // Add this for thread safety
   ros::Time controller_switch_time_;
 
 
@@ -505,26 +507,32 @@ void ExternalWrenchEstimator::timerComputeWrench(const ros::TimerEvent& te) {
       if (msg.data != "BumpTolerantController" && msg.data != "EmergencyController") {
         Eigen::Vector3d contact_point_body = estimateCollisionPoint(f_ext_hat_hp_, m_ext_hat_hp_, R, r_body, odom_msg->header.frame_id);
         
-        pending_contact_point_ = contact_point_body;
-        contact_point_sent_ = false;
-        controller_switch_pending_ = true;
-        controller_switch_time_ = ros::Time::now();
-
-        contact_point_timer_.start();
-        
-        mrs_msgs::String srv;
-        srv.request.value = "BumpTolerantController";
-        
-        if (switch_controller_client_.call(srv)) {
-          ROS_INFO("[ExternalWrenchEstimator]: Requested switch to BumpTolerantController");
-        } else {
-          ROS_ERROR("[ExternalWrenchEstimator]: Failed to switch controller");
-          controller_switch_pending_ = false;
+        // Add to queue instead of single point
+        {
+          std::lock_guard<std::mutex> queue_lock(queue_mutex_);
+          contact_points_queue_.push(contact_point_body);
         }
         
-        static ros::ServiceClient stop_wp = ros::NodeHandle().serviceClient<std_srvs::Trigger>("/uav1/example_waypoint_flier/stop_waypoints_following_in");
-        std_srvs::Trigger srv_stop;
-        stop_wp.call(srv_stop);
+        // Only request controller switch if it's not already pending
+        if (!controller_switch_pending_) {
+          controller_switch_pending_ = true;
+          controller_switch_time_ = ros::Time::now();
+          contact_point_timer_.start();
+          
+          mrs_msgs::String srv;
+          srv.request.value = "BumpTolerantController";
+          
+          if (switch_controller_client_.call(srv)) {
+            ROS_INFO("[ExternalWrenchEstimator]: Requested switch to BumpTolerantController");
+          } else {
+            ROS_ERROR("[ExternalWrenchEstimator]: Failed to switch controller");
+            controller_switch_pending_ = false;
+          }
+          
+          static ros::ServiceClient stop_wp = ros::NodeHandle().serviceClient<std_srvs::Trigger>("/uav1/example_waypoint_flier/stop_waypoints_following_in");
+          std_srvs::Trigger srv_stop;
+          stop_wp.call(srv_stop);
+        }
       }
       
       contact_msg.data = 10.0;
@@ -597,7 +605,11 @@ void ExternalWrenchEstimator::timerDebugSwitch(const ros::TimerEvent& /*te*/) {
   {
     std::lock_guard<std::mutex> lock(controller_switch_mutex_);
     
-    pending_contact_point_ = Eigen::Vector3d(0.335, -0.335, 0.0);
+    {
+      std::lock_guard<std::mutex> queue_lock(queue_mutex_);
+      contact_points_queue_.push(Eigen::Vector3d(0.335, -0.335, 0.0));
+    }
+    
     contact_point_sent_ = false;
     controller_switch_pending_ = true;
     controller_switch_time_ = ros::Time::now();
@@ -631,33 +643,58 @@ void ExternalWrenchEstimator::timerDebugSwitch(const ros::TimerEvent& /*te*/) {
 void ExternalWrenchEstimator::timerCheckControllerAndSendPoint(const ros::TimerEvent& /*te*/) {
   std::lock_guard<std::mutex> lock(controller_switch_mutex_);
   
-  if (controller_switch_pending_ && !contact_point_sent_) {
+  if (controller_switch_pending_) {
     if (sh_control_diagnostics_.hasMsg() && 
         sh_control_diagnostics_.getMsg()->active_controller == "BumpTolerantController") {
       
       if ((ros::Time::now() - controller_switch_time_).toSec() > 0.05) {
-        geometry_msgs::PointStamped contact_pt_msg;
-        contact_pt_msg.header.stamp = ros::Time::now();
-        contact_pt_msg.header.frame_id = "uav1/world_origin";
-        contact_pt_msg.point.x = pending_contact_point_.x();
-        contact_pt_msg.point.y = pending_contact_point_.y();
-        contact_pt_msg.point.z = pending_contact_point_.z();
+        // Check if we have points to send
+        std::lock_guard<std::mutex> queue_lock(queue_mutex_);
         
-        pub_contact_pt_.publish(contact_pt_msg);
-        
-        ROS_INFO("[ExternalWrenchEstimator]: Sent contact point: [%.3f, %.3f, %.3f]", 
-                 pending_contact_point_.x(), pending_contact_point_.y(), pending_contact_point_.z());
-        
-        contact_point_sent_ = true;
-        controller_switch_pending_ = false;
-
-        contact_point_timer_.stop();
+        if (!contact_points_queue_.empty()) {
+          // Get the first point (FIFO)
+          Eigen::Vector3d point = contact_points_queue_.front();
+          contact_points_queue_.pop();
+          
+          // Create and send the message
+          geometry_msgs::PointStamped contact_pt_msg;
+          contact_pt_msg.header.stamp = ros::Time::now();
+          contact_pt_msg.header.frame_id = "uav1/world_origin";
+          contact_pt_msg.point.x = point.x();
+          contact_pt_msg.point.y = point.y();
+          contact_pt_msg.point.z = point.z();
+          
+          pub_contact_pt_.publish(contact_pt_msg);
+          
+          ROS_INFO("[ExternalWrenchEstimator]: Sent contact point: [%.3f, %.3f, %.3f] (%zu more in queue)", 
+                  point.x(), point.y(), point.z(), contact_points_queue_.size());
+          
+          // If we have more points, keep the timer running
+          if (contact_points_queue_.empty()) {
+            contact_point_sent_ = true;
+            controller_switch_pending_ = false;
+            contact_point_timer_.stop();
+          } else {
+            // Set a timeout before sending the next point (100ms)
+            controller_switch_time_ = ros::Time::now(); 
+          }
+        } else {
+          // Queue is empty, stop the timer
+          contact_point_sent_ = true;
+          controller_switch_pending_ = false;
+          contact_point_timer_.stop();
+        }
       }
     } else if ((ros::Time::now() - controller_switch_time_).toSec() > 2.0) {
+      // Timeout waiting for controller switch
       ROS_WARN("[ExternalWrenchEstimator]: Timeout waiting for BumpTolerantController!");
       controller_switch_pending_ = false;
-
       contact_point_timer_.stop();
+      
+      // Clear the queue
+      std::lock_guard<std::mutex> queue_lock(queue_mutex_);
+      std::queue<Eigen::Vector3d> empty;
+      std::swap(contact_points_queue_, empty);
     }
   }
 }
