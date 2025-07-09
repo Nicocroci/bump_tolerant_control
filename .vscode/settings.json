@@ -97,5 +97,6 @@
         "variant": "cpp",
         "core": "cpp",
         "numericaldiff": "cpp"
-    }
+    },
+    "ros.distro": "noetic"
 }

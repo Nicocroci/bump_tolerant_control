@@ -32,6 +32,6 @@ force_threshold: 3    # [N]
 moment_threshold: 0.8  # [Nm]
 
 #Drone radius
-drone_radius : 0.47 # [m]
+drone_radius : 0.3834 # [m]
 
 enable_debug_switch: false

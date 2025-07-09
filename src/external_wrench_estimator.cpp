@@ -778,7 +778,20 @@ Eigen::Vector3d ExternalWrenchEstimator::estimateCollisionPoint(const Eigen::Vec
       ROS_INFO_STREAM("[ExternalWrenchEstimator][DEBUG]: rc_world: " << rc_world.transpose());
       pub_collision_marker_.publish(line_marker);*/
 
-    if (std::abs(rc_xy.norm() - drone_radius_) < tol) {
+    double half_side = drone_radius_; // metà lato del quadrato
+
+    bool on_square_edge =
+      (
+        (std::abs(rc_xy.x() - half_side) < tol || std::abs(rc_xy.x() + half_side) < tol) &&
+        (rc_xy.y() >= -half_side - tol && rc_xy.y() <= half_side + tol)
+      )
+      ||
+      (
+        (std::abs(rc_xy.y() - half_side) < tol || std::abs(rc_xy.y() + half_side) < tol) &&
+        (rc_xy.x() >= -half_side - tol && rc_xy.x() <= half_side + tol)
+      );
+
+    if (on_square_edge) {
       ROS_INFO_STREAM("[ExternalWrenchEstimator][DEBUG]: Found horizontal collision point at alpha=" << alpha << ", rc (body): " << rc.transpose());
       ROS_INFO_STREAM("[ExternalWrenchEstimator][DEBUG]: rc_world: " << rc_world.transpose());
       pub_collision_marker_.publish(line_marker);
