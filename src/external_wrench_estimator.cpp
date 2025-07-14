@@ -477,10 +477,13 @@ void ExternalWrenchEstimator::timerComputeWrench(const ros::TimerEvent& te) {
   static Eigen::Vector3d last_collision_point = Eigen::Vector3d::Zero();
 
   std_msgs::Float64 contact_msg;
+
+  auto position_msg = sh_gps_baro_.getMsg();
+  
   Eigen::Vector3d r_body(
-      uav_state_.pose.position.x,
-      uav_state_.pose.position.y,
-      uav_state_.pose.position.z);
+      position_msg->pose.pose.position.x, 
+      position_msg->pose.pose.position.y,
+      position_msg->pose.pose.position.z);
 
   ROS_INFO_THROTTLE(1.0, "[ExternalWrenchEstimator]: Drone position: (%.2f, %.2f, %.2f)", 
     r_body.x(), r_body.y(), r_body.z());
@@ -553,19 +556,19 @@ void ExternalWrenchEstimator::timerComputeWrench(const ros::TimerEvent& te) {
   cyl_marker.header.stamp       = ros::Time::now();
   cyl_marker.ns                 = "drone_cylinder";
   cyl_marker.id                 = 9999;
-  cyl_marker.type               = visualization_msgs::Marker::CYLINDER;
+  cyl_marker.type               = visualization_msgs::Marker::CUBE;
   cyl_marker.action             = visualization_msgs::Marker::ADD;
-  cyl_marker.scale.x            = 2 * 0.47;
-  cyl_marker.scale.y            = 2 * 0.47;
-  cyl_marker.scale.z            = 0.155;
-  Eigen::Vector3d cyl_center    = R * Eigen::Vector3d(0, 0, -0.0195) + Eigen::Vector3d(
-    odom_msg->pose.pose.position.x,
-    odom_msg->pose.pose.position.y,
-    odom_msg->pose.pose.position.z);
+  cyl_marker.scale.x            = 0.5;
+  cyl_marker.scale.y            = 0.5;
+  cyl_marker.scale.z            = 0.5;
+  Eigen::Vector3d cyl_center    = R * Eigen::Vector3d(0, 0, -0.0195) + r_body;
   cyl_marker.pose.position.x    = cyl_center.x();
   cyl_marker.pose.position.y    = cyl_center.y();
   cyl_marker.pose.position.z    = cyl_center.z();
-  cyl_marker.pose.orientation.w = 1.0;
+  cyl_marker.pose.orientation.x = odom_msg->pose.pose.orientation.x;
+  cyl_marker.pose.orientation.y = odom_msg->pose.pose.orientation.y;
+  cyl_marker.pose.orientation.z = odom_msg->pose.pose.orientation.z;
+  cyl_marker.pose.orientation.w = odom_msg->pose.pose.orientation.w;
   cyl_marker.color.a            = 0.3;
   cyl_marker.color.r            = 0.0;
   cyl_marker.color.g            = 0.0;

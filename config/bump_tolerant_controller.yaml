@@ -1,2 +1,2 @@
-radius:               0.47 # [m]
+uav_radius:               0.47 # [m]
 debug_hover_mode:     false
