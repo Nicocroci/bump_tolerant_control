@@ -141,7 +141,7 @@ private:
   // | -------- throttle generation and mass estimation --------- |
 
   double _uav_mass_; 
-  double uav_mass_difference_; 
+  double uav_mass_difference_;
 
   Gains_t gains_;
 
@@ -191,6 +191,9 @@ private:
   ros::Publisher pub_6_;
   ros::Publisher pub_7_;
   ros::Publisher pub_8_;
+  ros::Publisher pub_9_;
+  ros::Publisher pub_10_;
+  ros::Publisher pub_11_;
   ros::Timer     timer_diagnostics_;
 
   // | ----------------------- diagnostics ---------------------- |
@@ -338,6 +341,19 @@ private:
 
   Eigen::Vector2d Iw_w_;  
   Eigen::Vector2d Ib_b_;
+
+  // | --------------------- mooving on wall -------------------- |
+
+  Eigen::Vector2d xy_ref;
+
+  Eigen::Vector3d contact_point_W = Eigen::Vector3d::Zero();
+
+  bool mooving_on_wall_ = false;
+  bool x_target = false;
+
+  Eigen::Vector2d xy_0_wall = Eigen::Vector2d::Zero();
+  Eigen::Vector2d xy_ref_wall;
+  
   
 };
 
@@ -380,10 +396,10 @@ bool BumpTolerantController::initialize(const ros::NodeHandle& nh, std::shared_p
   param_loader.loadParam("gains/kibxy_lim", gains_.kibxy_lim, 0.5);
   param_loader.loadParam("gains/km", gains_.km, 0.01);
   param_loader.loadParam("gains/km_lim", gains_.km_lim, _uav_mass_ * 0.3);
-  param_loader.loadParam("gains/kq_roll_pitch", gains_.kq_roll_pitch, 1.0);
+  param_loader.loadParam("gains/kq_roll_pitch", gains_.kq_roll_pitch, 5.0);
   param_loader.loadParam("gains/kq_yaw", gains_.kq_yaw, 1.0);
-  param_loader.loadParam("gains/kw_roll_pitch", gains_.kw_rp, 100.0); 
-  param_loader.loadParam("gains/kw_yaw", gains_.kw_y, 1.0);        
+  param_loader.loadParam("gains/kw_roll_pitch", gains_.kw_rp, 4.0); 
+  param_loader.loadParam("gains/kw_yaw", gains_.kw_y, 4.0);        
 
   param_loader.loadParam("wall_interaction/desired_contact_force", p_desired_contact_force_, 1.0);
   param_loader.loadParam("wall_interaction/alignment_max_yaw_rate", p_alignment_max_yaw_rate_, 0.3);
@@ -434,7 +450,7 @@ bool BumpTolerantController::initialize(const ros::NodeHandle& nh, std::shared_p
   pub_desired_throttle_       = nh_.advertise<std_msgs::Float64>("desired_throttle", 1);
   pub_switch_command_         = nh_.advertise<std_msgs::Bool>("switch_controller_command", 1);
   pub_contact_cloud           = nh_.advertise<sensor_msgs::PointCloud2>("contact_points_cloud", 1);
-  pub_1_                      = nh_.advertise<geometry_msgs::PointStamped>("pub_1", 1);
+  pub_1_                      = nh_.advertise<geometry_msgs::PointStamped>("move_away", 1);
   pub_2_                      = nh_.advertise<std_msgs::Float64>("pub_2", 1);
   pub_3_                      = nh_.advertise<std_msgs::Float64>("pub_3", 1);
   pub_4_                      = nh_.advertise<std_msgs::Float64>("pub_4", 1);
@@ -442,6 +458,9 @@ bool BumpTolerantController::initialize(const ros::NodeHandle& nh, std::shared_p
   pub_6_                      = nh_.advertise<geometry_msgs::PointStamped>("pub_6", 1);
   pub_7_                      = nh_.advertise<geometry_msgs::PointStamped>("pub_7", 1);
   pub_8_                      = nh_.advertise<geometry_msgs::PointStamped>("pub_8", 1);
+  pub_9_                      = nh_.advertise<geometry_msgs::PointStamped>("pub_9", 1);
+  pub_10_                     = nh_.advertise<std_msgs::Float64>("pub_10", 1);
+  pub_11_                     = nh_.advertise<geometry_msgs::PointStamped>("projected_point", 1);
 
   // | ------------------------- timers ------------------------- |
 
@@ -676,7 +695,10 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
       double x_projection = contact_point_msg->point.x;
       double y_projection = contact_point_msg->point.y;
       Eigen::Vector3d contact_point_B(x_projection, y_projection, uav_pos_W.z());
-      Eigen::Vector3d contact_point_W = R_B_to_W * contact_point_B + uav_pos_W;
+      if (contact_point_B.x() > 0.0) {
+        contact_point_B = - contact_point_B;
+      }
+      contact_point_W = R_B_to_W * contact_point_B + uav_pos_W;
       contact_point_W.z() = uav_pos_W.z();
 
       // Contact direction from drone to contact point
@@ -717,7 +739,7 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
     }
 
     Eigen::Array3d Kq;
-    Kq << gains_.kw_rp, gains_.kw_rp, gains_.kw_y;
+    Kq << gains_.kq_roll_pitch, gains_.kq_roll_pitch, gains_.kq_yaw;
     
     Eigen::Vector3d attitude_rate_saturation(
         constraints_.roll_rate,
@@ -792,11 +814,19 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
 
       if (mooving_towards_target) time_limit_safety_position = ros::Time::now();
 
+      geometry_msgs::PointStamped pos_msg;
+      pos_msg.header.stamp = ros::Time::now();
+      pos_msg.header.frame_id = "uav1/world_origin";
+      pos_msg.point.x = recovery_position_.x();
+      pos_msg.point.y = recovery_position_.y();
+      pos_msg.point.z = recovery_position_.z();
+      pub_1_.publish(pos_msg);
+
       ROS_INFO_THROTTLE(0.5, "[%s][ALIGNING]: Moving away from contact point, moving towards target: %s, velocity magnitude: %.2f m/s, distance to target: %.2f m", 
                         name_.c_str(), mooving_towards_target ? "true" : "false", std::sqrt(uav_vel_B.x() * uav_vel_B.x() + uav_vel_B.y() * uav_vel_B.y()),
                         std::abs((recovery_position_.head<2>() - uav_pos_W.head<2>()).norm()));
 
-      if ((!mooving_towards_target && (ros::Time::now() - time_limit_safety_position).toSec() > 6.0) || (ros::Time::now() - time_limit_safety_position).toSec() > 10.0) {
+      if ((!mooving_towards_target && (ros::Time::now() - time_limit_safety_position).toSec() > 5.0) || (ros::Time::now() - time_limit_safety_position).toSec() > 10.0) {
 
         time_limit_safety_position = ros::Time::now();
         
@@ -806,15 +836,7 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
         direction_to_contact.z() = 0;
         direction_to_contact.normalize();
         Eigen::Vector3d direction_to_recovery = (recovery_position_ - uav_pos_W).normalized();
-        recovery_position_       -= direction_to_contact * 2*safety_distance_;
-
-        geometry_msgs::PointStamped pos_msg;
-        pos_msg.header.stamp = ros::Time::now();
-        pos_msg.header.frame_id = "uav1/world_origin";
-        pos_msg.point.x = recovery_position_.x();
-        pos_msg.point.y = recovery_position_.y();
-        pos_msg.point.z = recovery_position_.z();
-        pub_1_.publish(pos_msg);
+        recovery_position_       -= direction_to_contact * 2 * safety_distance_;        
 
         stuck_counter_           = 0;
 
@@ -836,8 +858,8 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
       pub_7_.publish(pos_error_msg);
       
       // Create position control command
-      double kp_xy = 2.0; // Position gain
-      double kd_xy = 2.0 * std::sqrt(kp_xy); // Velocity damping
+      double kp_xy = 5.0; // Position gain
+      double kd_xy = std::sqrt(kp_xy); // Velocity damping
       
       // Calculate force in horizontal plane to move away
       Eigen::Vector2d force_horizontal_xy = kp_xy * pos_error.head<2>() - kd_xy * uav_vel_W.head<2>();
@@ -865,7 +887,11 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
       Eigen::Vector3d rate_feedforward = Eigen::Vector3d::Zero();
       double yaw_error = 0;
 
-      if (std::abs(uav_pos_W.head<2>().norm() - recovery_position_.head<2>().norm()) < 0.25){
+      double proj = pos_error.dot(direction_to_contact);
+
+      
+
+      if (proj < 0){
         if(first_rotation_iteration_) {
           double wall_yaw = std::atan(m_wall);
         
@@ -883,7 +909,6 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
           
           // Find the closest parallel orientation
           double min_diff = 2*M_PI;
-          target_yaw = wall_yaw;
           for (int i = 0; i < 4; i++) {
             double diff = std::abs(angles::shortest_angular_distance(current_yaw, parallel_yaws[i]));
             if (diff < min_diff) {
@@ -985,8 +1010,28 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
                         pos_error.x(), pos_error.y(), pos_error.z(),
                         yaw_error);
 
+      Eigen::Vector3d rel = uav_pos_W - contact_point_W;
+      rel.z() = 0;
+      Eigen::Vector3d direction_to_recovery = -direction_to_contact;
+      double s = rel.dot(direction_to_recovery);
+
+      ROS_INFO_THROTTLE(0.5, "[%s][ALIGNING]: s: %.3f, direction to contact: [%.2f, %.2f, %.2f], rel: [%.2f, %.2f, %.2f]",
+                        name_.c_str(), s,
+                        direction_to_recovery.x(), direction_to_recovery.y(), direction_to_recovery.z(),
+                        rel.x(), rel.y(), rel.z());
+
+      Eigen::Vector3d projected_pt = contact_point_W + s * direction_to_recovery;
+
+      geometry_msgs::PointStamped projected_point_msg;
+      projected_point_msg.header.stamp = ros::Time::now();
+      projected_point_msg.header.frame_id = "uav1/world_origin";
+      projected_point_msg.point.x = projected_pt.x();
+      projected_point_msg.point.y = projected_pt.y();
+      projected_point_msg.point.z =0;
+      pub_11_.publish(projected_point_msg);
+
       // Check if we've reached the recovery position
-      if (pos_error.head<2>().norm() < 0.15 && std::sqrt(uav_vel_B.x() * uav_vel_B.x() + uav_vel_B.y() * uav_vel_B.y()) < 0.5
+      if (s > 0.3
           && std::abs(yaw_error) < 0.1) { // ~3 degrees threshold
         alignment_yaw_rate_low_counter_++;
         if (alignment_yaw_rate_low_counter_ >= 1) { // Stable for 10 iterations
@@ -1008,11 +1053,17 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
     } else msg.data = 10.0;
     pub_sliding_phase_.publish(msg);
 
+    // DEBUG MOOVING ON WALL
+
+
     if (first_sliding_iteration_) {
       tangent_ref_pos = uav_pos_W;
       initial_position_ = uav_pos_W;
       sliding_start_time = ros::Time::now();
-
+      
+      // DEBUG MOOVING ON WALL
+      xy_ref.x() = -40;
+      xy_ref.y() = 3;
     }
 
     // 0.1) Check teh relative orientation between the drone and the obstacle
@@ -1074,6 +1125,7 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
 
     // 0.2) Verify if the obstacle is still present
     std_msgs::Bool switch_msg;
+    switch_msg.data = false;
     bool mooving = std::abs((R_OrientAdjust * uav_vel_B).y()) > 0.2 * contact_velocity_magnitude &&
                    std::signbit((R_OrientAdjust * uav_vel_B).y()) == std::signbit((R_B_to_W.transpose() * normal_ref_vel_W_).y());
 
@@ -1084,27 +1136,60 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
 
     ROS_INFO_THROTTLE(0.1, "[%s][SLIDING_SQUARE]: Mooving: %s, contact velocity magnitude: %.3f/%.3f, current velocity: [%.3f, %.3f, %.3f], %.3f>%.3f, q_wall: %.3f",
                       name_.c_str(), mooving ? "true" : "false", 
-                      (R_OrientAdjust * uav_vel_B).y(), contact_velocity_magnitude * 0.5,
+                      (R_OrientAdjust * uav_vel_B).y(), contact_velocity_magnitude * 0.2,
                       uav_vel_B.x(), uav_vel_B.y(), uav_vel_B.z(),
                       uav_pos_W.y(), uav_pos_W.x() * m_wall + q_wall + 1.0,
                       q_wall);
 
-    bool mooving_forward = normal_ref_vel_W_.y() > 0.0;
-    bool mooving_backward =  normal_ref_vel_W_.y() < 0.0;
+    double delta_q = std::max(0.5, -29.5 * wall_points.size()/max_wall_points + 30.0);
 
-    bool ahead_of_wall_with_margin = uav_pos_W.y() > uav_pos_W.x() * m_wall + q_wall + 1.0 && ready_to_sliding_ && mooving ;
-    bool behind_wall_with_margin = uav_pos_W.y() < uav_pos_W.x() * m_wall + q_wall - 1.0 && ready_to_sliding_ && mooving ;
+    bool ahead_of_wall_with_margin = uav_pos_W.y() > uav_pos_W.x() * m_wall + q_wall + delta_q && ready_to_sliding_ && mooving ;
+    bool behind_wall_with_margin = uav_pos_W.y() < uav_pos_W.x() * m_wall + q_wall - delta_q && ready_to_sliding_ && mooving ;
+
+    bool mooving_forward;
+    bool switch_controller = false;
+    if (std::abs(m_wall) < 10.0){
+      mooving_forward = (m_wall * direction_to_contact.x() + direction_to_contact.y()) > 0.0;
+
+      if ((mooving_forward && ahead_of_wall_with_margin) || (!mooving_forward && behind_wall_with_margin) ) {
+        switch_msg.data = true;
+        }
+    }else{
+      mooving_forward = direction_to_contact.y() > 0.0;
+      if ((uav_pos_W.y() > uav_pos_W.x() * std::abs(m_wall) + q_wall + delta_q && ready_to_sliding_ && mooving) && mooving_forward) {
+        switch_msg.data = true;
+      }else if ((uav_pos_W.y() < uav_pos_W.x() * std::abs(m_wall) + q_wall - delta_q && ready_to_sliding_ && mooving) && !mooving_forward) {
+        switch_msg.data = true;
+      }
+    }
+
+    if (switch_msg.data) {
+      ROS_INFO("[%s][SLIDING_SQUARE]: Total weight: %.2f, wall yaw total weight: %.2f, wall yaw weighted sum: %.3f",
+              name_.c_str(), wall_yaw_total_weight, wall_yaw_total_weight, wall_yaw_weighted_sum);
+
+      ROS_INFO("[%s][SLIDING_SQUARE]: mooving forward: %s, normal ref vel: [%.3f, %.3f, %.3f],",
+                      name_.c_str(), mooving_forward ? "true" : "false", 
+                      normal_ref_vel_W_.x(), normal_ref_vel_W_.y(), normal_ref_vel_W_.z());
+                      
+      for (const auto& point : wall_points) {
+        ROS_INFO("[%s][SLIDING_SQUARE]: Wall point: [%.3f, %.3f, %.3f], weight: %.3f, q_wall: %.3f",
+                name_.c_str(),
+                point.position.x(), point.position.y(), point.position.z(), point.weight,
+                -point.position.x() * m_wall + point.position.y());
+      }
+      pub_switch_command_.publish(switch_msg);
+    }
+
+    
+
+
+
 
     ROS_INFO_THROTTLE(0.1, "[%s][SLIDING_SQUARE]: mooving forward: %s, normal ref vel: [%.3f, %.3f, %.3f],",
                       name_.c_str(), mooving_forward ? "true" : "false", 
                       normal_ref_vel_W_.x(), normal_ref_vel_W_.y(), normal_ref_vel_W_.z());
 
-    if ((mooving_forward && ahead_of_wall_with_margin) || (mooving_backward && behind_wall_with_margin) ) {
-      ROS_INFO("[%s][SLIDING_SQUARE]: Total weight: %.2f, wall yaw total weight: %.2f, wall yaw weighted sum: %.3f",
-              name_.c_str(), wall_yaw_total_weight, wall_yaw_total_weight, wall_yaw_weighted_sum);
-      switch_msg.data = true;
-    } else switch_msg.data = false;
-    pub_switch_command_.publish(switch_msg);
+    
 
     // 0.3) Data collection and wall estimation
 
@@ -1126,7 +1211,7 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
       pub_2_.publish(wall_estimation_weight_msg);
 
       std_msgs::Float64 velocity_msg;
-      velocity_msg.data = (R_OrientAdjust * uav_vel_B).y();
+      velocity_msg.data = (R_OrientAdjust * uav_vel_B).x();
       pub_3_.publish(velocity_msg);
 
       std_msgs::Float64 velocity_weight_msg;
@@ -1134,15 +1219,29 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
       pub_4_.publish(velocity_weight_msg);
 
 
-      ROS_INFO_THROTTLE(0.1, "[%s][SLIDING_SQUARE]: Wall estimation weight: %.3f, velocity weight: %.3f, rotation stability: %.3f, vecity: %.3f, angular velocity: [%.3f]",
-              name_.c_str(), wall_estimation_weight, velocity_weight, rotation_stability, (R_OrientAdjust * uav_vel_B).y(), uav_state.velocity.angular.z);
+      ROS_INFO_THROTTLE(0.1, "[%s][SLIDING_SQUARE]: Wall estimation weight: %.3f, velocity weight: %.3f, rotation stability: %.3f, velocity: %.3f, angular velocity: [%.3f]",
+              name_.c_str(), wall_estimation_weight, velocity_weight, rotation_stability, (R_OrientAdjust * uav_vel_B).x(), uav_state.velocity.angular.z);
 
-      if (wall_estimation_weight > 0.7){
-        wall_yaw_weighted_sum += 2*current_yaw * wall_estimation_weight;
-        wall_yaw_total_weight += 2*wall_estimation_weight;
+      if (wall_estimation_weight > 0.6){
+        wall_yaw_weighted_sum += 2 *current_yaw * wall_estimation_weight;
+        wall_yaw_total_weight += 2 * wall_estimation_weight;
       }
 
       if (wall_yaw_total_weight > 500.0) {
+        if (xy_0_wall.isZero(1e-6) || first_sliding_iteration_) {
+          xy_0_wall.x() = uav_pos_W.x();
+          xy_0_wall.y() = uav_pos_W.y();
+        }
+        xy_ref_wall.x() = xy_0_wall.x() + xy_ref.x() * (1/std::sqrt(1 + m_wall * m_wall));
+        xy_ref_wall.y() = m_wall * xy_ref_wall.x() + q_wall;
+
+        geometry_msgs::PointStamped ref_point_msg;
+        ref_point_msg.header.stamp = ros::Time::now();
+        ref_point_msg.header.frame_id = "uav1/world_origin";
+        ref_point_msg.point.x = xy_ref_wall.x();
+        ref_point_msg.point.y = xy_ref_wall.y();
+        ref_point_msg.point.z =0;
+        pub_9_.publish(ref_point_msg);
 
         ready_to_sliding_ = true;
         estimated_wall_yaw = wall_yaw_weighted_sum / wall_yaw_total_weight;
@@ -1161,19 +1260,6 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
 
     }else first_sliding_iteration_= false;
 
-    if (q_wall< 8){
-        int counter = 0;
-        ROS_INFO("[%s][SLIDING_SQUARE]: desired yaw: %.3f, current yaw: %.3f, m: %.3f",
-                 name_.c_str(), desired_yaw_, current_yaw, std::tan(desired_yaw_));
-        for (auto& point : wall_points) {
-          ROS_INFO("[%s][SLIDING_SQUARE]: Wall point: [%.3f, %.3f, %.3f],number: %d, weight: %.3f, q: %.3f",
-                   name_.c_str(),
-                   point.position.x(), point.position.y(), point.position.z(),
-                   counter ,point.weight, point.q);
-          counter++;
-        }
-      }
-
 
     if (ready_to_sliding_ && wall_estimation_weight > 0.8) {
       auto computeQ = [](const Eigen::Vector3d& pos, double m_wall) {
@@ -1182,7 +1268,7 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
       
       bool new_valid_wall_point = false;
       
-      if (wall_points.size() < max_wall_points/3) {
+      if (wall_points.size() < max_wall_points) {
         m_wall = std::tan(estimated_wall_yaw);
         wall_points.push_back({uav_pos_W, wall_estimation_weight, computeQ(uav_pos_W, m_wall)});
 
@@ -1208,6 +1294,10 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
                           name_.c_str(),
                           uav_pos_W.x(), uav_pos_W.y(), uav_pos_W.z(),
                           wall_estimation_weight);        
+      }
+
+      if (wall_points.size() < max_wall_points/3){
+        m_wall = std::tan(estimated_wall_yaw);
       }
 
       bool time_elapsed = (ros::Time::now() - last_wall_point_update_time_).toSec() > 0.1;
@@ -1253,7 +1343,7 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
 
       }
       if (wall_points.size() > max_wall_points) {
-        wall_points.resize(max_wall_points);
+        wall_points.resize(max_wall_points-1);
       }
     }else if (ready_to_sliding_) {
       ROS_INFO_THROTTLE(0.1, "[%s][SLIDING_SQUARE]: Wall estimation weight too low: %.3f, not adding new point.", name_.c_str(), wall_estimation_weight);
@@ -1372,7 +1462,7 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
                       uav_vel_W.x(), uav_vel_W.y(), uav_vel_W.z());
 
     // 1.3 Impedance errors
-    impedance_vel_error_B_                 = normal_ref_vel_B_ - uav_vel_B;
+    impedance_vel_error_B_                 = normal_component_Wall - uav_vel_B;
     Eigen::Vector3d impedance_vel_error_W_ = R_B_to_W * impedance_vel_error_B_;
     
     Eigen::Vector3d impedance_pos_error_W_ = normal_ref_pos_W_ - uav_pos_W;
@@ -1394,7 +1484,7 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
                       impedance_pos_error_B_.x(), impedance_pos_error_B_.y(), impedance_pos_error_B_.z(),
                       impedance_vel_error_B_.x(), impedance_vel_error_B_.y(), impedance_vel_error_B_.z());
 
-    if (!ready_to_sliding_) {
+    /*if (!ready_to_sliding_) {
       double initial_delta = (R_OrientAdjust * (initial_position_ - uav_pos_W)).y();
       if (std::abs(initial_delta) > 2 * safety_distance_) {
         ROS_WARN("[%s][SLIDING_SQUARE]: Initial position too far from the wall, stopping sliding square.", name_.c_str());
@@ -1403,7 +1493,7 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
         direction_to_contact = -direction_to_contact;
         safety_distance_ *= 3;
       }
-    }
+    }*/
 
     // 2. Impedance parameters
 
@@ -1423,18 +1513,56 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
     // 4.1 Limiting the pos error
     
     pos_error_tangent = (R_OrientAdjust * (tangent_ref_pos - uav_pos_W)).x();
-    if (pos_error_tangent > 3.0) {
-      pos_error_tangent = 3.0;
-    } else if (pos_error_tangent < -3.0) {
-      pos_error_tangent = -3.0;
-    }
 
     // 4.2 Setting sliding tangent command
     double yaw_reduction_term         = 1 / (1.0 + std::exp(10 * (std::abs(yaw_error) - 0.349066))); // 20 deg
     double normal_reduction_term      = 1 / (1.0 + std::exp(15 * (std::abs((R_OrientAdjust * uav_vel_B).y()) - 0.2))); // 0.3 m/s
-    sliding_direction_ = 1;
+    sliding_direction_ = -1;
     double sliding_velocity_magnitude = std::clamp(sliding_direction_ * 2.5 * yaw_reduction_term * normal_reduction_term,
-                                        (R_OrientAdjust * uav_vel_B).y() - 2, (R_OrientAdjust * uav_vel_B).y() + 2);
+                                        (R_OrientAdjust * uav_vel_B).x() - 2, (R_OrientAdjust * uav_vel_B).x() + 2);
+
+    if (mooving_on_wall_ && ready_to_sliding_){
+      double min_dist = 0.5;
+      double max_dist = 5.0;
+      Eigen::Vector2d drone_xy(uav_pos_W.x(), uav_pos_W.y());
+      Eigen::Vector2d tangent_xy(sliding_tangent_inertial_cmd_.x(), sliding_tangent_inertial_cmd_.y());
+      tangent_xy.normalize();
+
+      double distance = (xy_ref_wall - drone_xy).dot(tangent_xy);
+      double distance_abs = std::abs(distance);
+      ROS_INFO_THROTTLE(0.1, "[%s][SLIDING_SQUARE]: Distance to wall along tangent: %.3f, initial sliding velocity : %.3f",
+                        name_.c_str(), distance, sliding_velocity_magnitude);
+      if (distance_abs <= min_dist){
+        sliding_velocity_magnitude = 0.0;
+        double k_additional = 2.0;
+        pos_error_tangent = distance * k_additional;
+        if (std::abs(uav_vel_B.head<2>().norm())< 0.05) force_normal*= 0.5;
+      } else if (distance_abs <= max_dist) {
+        min_dist *= 0.5;;
+        double scale = (distance_abs - min_dist) / (max_dist - min_dist);
+        scale = std::max(0.0, std::min(1.0, scale));
+        sliding_velocity_magnitude = ((distance >= 0) ? 1.0 : -1.0) * scale * std::abs(sliding_velocity_magnitude);
+        ROS_INFO("[%s][SLIDING_SQUARE]: Sliding velocity magnitude scaled to: %.3f, with scale: %.3f", name_.c_str(), sliding_velocity_magnitude, scale);
+        double k_additional = 1.5;
+        //pos_error_tangent = distance * k_additional;
+        if (std::abs(uav_vel_B.head<2>().norm())< 0.05) force_normal*= 0.5;
+        if((R_OrientAdjust * uav_vel_B).x() < 0.5){
+          pos_error_tangent = distance * k_additional;
+        }
+      }
+      if (distance_abs <= 0.1){
+        x_target = true;
+        ROS_INFO("[%s][SLIDING_SQUARE]: Mooving vertical, sliding phase completed", name_.c_str());
+      }
+    }
+
+    pos_error_tangent = std::clamp(pos_error_tangent, -3.0 , 3.0);
+
+    std_msgs::Float64 sliding_velocity_msg;
+    sliding_velocity_msg.data = sliding_velocity_magnitude;
+    pub_10_.publish(sliding_velocity_msg);
+
+    
 
 
     ROS_INFO_THROTTLE(0.1, "[%s][SLIDING_SQUARE]: Yaw reduction term: %.3f, normal reduction term: %.3f, sliding velocity magnitude: %.3f/2.5, velocity error: %.3f",
@@ -1454,6 +1582,11 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
 
     // 4.4 Tangent force command
     double f_cmd_sliding = p_sliding_kp_pos_tangent_ * pos_error_tangent + p_sliding_kd_pos_tangent_ * vel_error_tangent;
+
+    ROS_INFO_THROTTLE(0.1, "[%s][SLIDING_SQUARE]:Velocity gain: %.3f, Position gain: %.3f, f_cmd_sliding: %.3f, pos error tangent: %.3f",
+                      name_.c_str(),
+                      p_sliding_kp_pos_tangent_, p_sliding_kd_pos_tangent_,
+                      f_cmd_sliding, pos_error_tangent);
 
     if (!ready_to_sliding_) {
       f_cmd_sliding = 0.0;
@@ -1500,6 +1633,10 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
                       tracker_command.position.x, tracker_command.position.y, tracker_command.position.z);
 
     double pos_error_z = tracker_command.position.z - uav_pos_W.z();
+    if (mooving_on_wall_ && x_target){
+      pos_error_z = xy_ref.y() - uav_pos_W.z();
+      force_normal *= 0.5;
+    }
     double vel_error_z = - uav_vel_W.z();
     Eigen::Vector3d pd_cmd_z_W (0, 0, p_sliding_kp_pos_z_ * pos_error_z + p_sliding_kd_pos_z_ * vel_error_z);
     Eigen::Vector3d total_force_cmd_W = gravity_comp_W + force_normal + force_cmd_tangent - disturbance_comp_W + pd_cmd_z_W;
@@ -1508,7 +1645,7 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
     
     // 6.1 Attitude extraction
     Eigen::Vector3d z_body_des = total_force_cmd_W.normalized();
-    Eigen::Vector3d x_c(std::cos(std::atan(m_wall)), std::sin(std::atan(m_wall)), 0);
+    Eigen::Vector3d x_c(std::cos(std::atan(m_wall)), std::sin(std::atan(std::atan(m_wall))), 0);
     Eigen::Vector3d y_body_des = z_body_des.cross(x_c).normalized();
     Eigen::Vector3d x_body_des = y_body_des.cross(z_body_des).normalized();
 
@@ -1575,7 +1712,7 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
       orthogonal_to_y = false;
       wall_yaw_weighted_sum = 0.0;
       wall_yaw_total_weight = 0.0;
-      ROS_WARN_THROTTLE(0.1, "[%s][SLIDING_SQUARE]: Yaw deviation too high, resetting wall estimation, yaw difference is : %.3f", name_.c_str(), 
+      ROS_WARN("[%s][SLIDING_SQUARE]: Yaw deviation too high, resetting wall estimation, yaw difference is : %.3f", name_.c_str(), 
                       std::abs(current_yaw - initial_yaw_));
       wall_points.clear();
       ready_to_sliding_ = false;
@@ -1589,7 +1726,7 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
     auto ext_torque = sh_ext_torque_.getMsg();
     double ext_mz = ext_torque->z;
     double desired_yaw_rate = 0.0;
-    if (std::abs(yaw_error)>0.1){
+    if (std::abs(yaw_error)>0.2){
       desired_yaw_rate = kp_yaw * yaw_error - kd_yaw * yaw_rate_current - ext_mz;
     }
 
