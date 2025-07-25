@@ -120,7 +120,7 @@ private:
   mrs_lib::SubscribeHandler<std_msgs::Bool>                      sh_switch_command_;
   mrs_lib::SubscribeHandler<mrs_msgs::FutureTrajectory>          sh_predicted_trajectory_;
   mrs_lib::SubscribeHandler<nav_msgs::Odometry>                  sh_gps_baro_;
-
+  mrs_lib::SubscribeHandler<geometry_msgs::Vector3>              sh_subpath_;
   // | ------------------------ publishers ------------------------- |
 
   ros::Publisher pub_wrench_;
@@ -370,6 +370,8 @@ void ExternalWrenchEstimator::timerComputeWrench(const ros::TimerEvent& te) {
     odom_msg->twist.twist.linear.y,
     odom_msg->twist.twist.linear.z);
 
+    ROS_INFO_THROTTLE(1.0, "[ExternalWrenchEstimator]: Drone velocity: [%.2f, %.2f, %.2f], scalar: %.2f", v.x(), v.y(), v.z(), v.norm());
+
   Eigen::Vector3d w(
     odom_msg->twist.twist.angular.x,
     odom_msg->twist.twist.angular.y,
@@ -509,6 +511,15 @@ void ExternalWrenchEstimator::timerComputeWrench(const ros::TimerEvent& te) {
       
       if (msg.data != "BumpTolerantController" && msg.data != "EmergencyController") {
         Eigen::Vector3d contact_point_body = estimateCollisionPoint(f_ext_hat_hp_, m_ext_hat_hp_, R, r_body, odom_msg->header.frame_id);
+
+        ros::ServiceClient set_constraints_client = nh_.serviceClient<mrs_msgs::String>("/uav1/constraint_manager/set_constraints");
+        mrs_msgs::String constraint_srv;
+        constraint_srv.request.value = "slow"; // or "medium", "fast", ecc.
+        if (set_constraints_client.call(constraint_srv)) {
+          ROS_INFO("[ExternalWrenchEstimator]: Requested constraint profile: %s", constraint_srv.request.value.c_str());
+        } else {
+          ROS_ERROR("[ExternalWrenchEstimator]: Failed to set constraint profile: %s", constraint_srv.request.value.c_str());
+        }
         
         // Add to queue instead of single point
         {
