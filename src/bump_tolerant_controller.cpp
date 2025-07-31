@@ -274,7 +274,7 @@ private:
 
   Eigen::Vector3d recovery_position_;
   Eigen::Vector3d direction_to_contact          = Eigen::Vector3d::Zero();
-  double          attitude_stability_threshold_ = 0.01; // rad, ~3 degrees
+  double          attitude_stability_threshold_ = 0.1; // rad, ~3 degrees
   double          target_yaw;
   int             attitude_stable_counter_      = 0;
   double          safety_distance_              = 0.4;
@@ -283,6 +283,17 @@ private:
   bool            first_rotation_iteration_     = true;
 
   double desired_altitude_ = 0.0;
+
+  int   C             = 0;
+  const size_t N_win  = 200;
+  const int T_thresh  = 1;
+  double last_error   = 0.0;
+  int approach_count  = 0;
+  std::deque<bool>      approach_window;
+
+  Eigen::Vector2d integral_xy = Eigen::Vector2d::Zero();
+
+  bool inhibit_sliding_ = false;
 
   // | --------------------- wall estimation -------------------- |
 
@@ -297,7 +308,6 @@ private:
   bool orthogonal_to_y = false;
 
   // | ----------------- interaction parameters ----------------- |
-  double p_desired_contact_force_;      
   double p_alignment_max_yaw_rate_;  
   
   Eigen::Vector3d impedance_vel_error_B_;
@@ -315,13 +325,17 @@ private:
 
   // | --------------------- sliding control -------------------- |
 
-  double p_sliding_kp_force_;
+  double kp_sliding_;
+  double kd_sliding_;
 
-  double p_sliding_kp_pos_tangent_;
-  double p_sliding_kd_pos_tangent_;
+  double k_admittance_;
+  double d_admittance_;
 
-  double p_sliding_kp_pos_z_;
-  double p_sliding_kd_pos_z_;
+  double kp_pos_z_;
+  double kd_pos_z_;
+
+  double sliding_vel_;
+  double admittance_vel_;
 
   Eigen::Vector3d sliding_tangent_inertial_cmd_;
 
@@ -389,26 +403,6 @@ bool BumpTolerantController::initialize(const ros::NodeHandle& nh, std::shared_p
 
   param_loader.loadParam("uav_radius", radius_, 0.5);
 
-  param_loader.loadParam("gains/kiwxy", gains_.kiwxy, 0.0);
-  param_loader.loadParam("gains/kibxy", gains_.kibxy, 0.0);
-  param_loader.loadParam("gains/kiwxy_lim", gains_.kiwxy_lim, 0.5);
-  param_loader.loadParam("gains/kibxy_lim", gains_.kibxy_lim, 0.5);
-  param_loader.loadParam("gains/km", gains_.km, 0.01);
-  param_loader.loadParam("gains/km_lim", gains_.km_lim, _uav_mass_ * 0.3);
-  param_loader.loadParam("gains/kq_roll_pitch", gains_.kq_roll_pitch, 1.0);
-  param_loader.loadParam("gains/kq_yaw", gains_.kq_yaw, 1.0);
-  param_loader.loadParam("gains/kw_roll_pitch", gains_.kw_rp, 100.0); 
-  param_loader.loadParam("gains/kw_yaw", gains_.kw_y, 1.0);        
-
-  param_loader.loadParam("wall_interaction/desired_contact_force", p_desired_contact_force_, 1.0);
-  param_loader.loadParam("wall_interaction/alignment_max_yaw_rate", p_alignment_max_yaw_rate_, 0.3);
-
-  param_loader.loadParam("wall_interaction/sliding/kp_force", p_sliding_kp_force_, 0.5);
-  param_loader.loadParam("wall_interaction/sliding/kp_pos_tangent", p_sliding_kp_pos_tangent_, 5.0);
-  param_loader.loadParam("wall_interaction/sliding/kd_pos_tangent", p_sliding_kd_pos_tangent_, 5.0);
-  param_loader.loadParam("wall_interaction/sliding/kp_pos_z", p_sliding_kp_pos_z_, 1.0);
-  param_loader.loadParam("wall_interaction/sliding/kd_pos_z", p_sliding_kd_pos_z_, 0.5);
-
   // | ------------------- initial parameters ------------------- |
 
   wall_interaction_state_ = ALIGNING_TO_WALL;
@@ -453,7 +447,7 @@ bool BumpTolerantController::initialize(const ros::NodeHandle& nh, std::shared_p
   pub_subpath_                = nh_.advertise<geometry_msgs::PoseArray>("/uav1/sliding_subpath", 1);
   pub_1_                      = nh_.advertise<geometry_msgs::PointStamped>("recovery_point", 1);
   pub_2_                      = nh_.advertise<std_msgs::Float64>("pub_2_wall_estimation_weight", 1);
-  pub_3_                      = nh_.advertise<std_msgs::Float64>("pub_3_normal_velocity", 1);
+  pub_3_                      = nh_.advertise<std_msgs::Float64>("pub_3_normal_velocity_actual", 1);
   pub_4_                      = nh_.advertise<std_msgs::Float64>("pub_4_velocity_weight", 1);
   //Alligning to wall
   pub_5_                      = nh_.advertise<geometry_msgs::PointStamped>("pub_5_desired_attitude", 1);
@@ -646,8 +640,6 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
   double current_pitch  = mrs_lib::AttitudeConverter(q).getPitch();
   double current_yaw    = mrs_lib::AttitudeConverter(q).getYaw();
 
-  double current_imu_yaw_rate = imu_msg->angular_velocity.z;
-
   Eigen::Vector3d z_body_world = R_B_to_W.col(2);
   double tilt_rad = std::acos(z_body_world.dot(Eigen::Vector3d::UnitZ()));
   double tilt_deg = tilt_rad * 180.0 / M_PI;
@@ -753,11 +745,18 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
       msg.data = 0.0;
 
       bool attitude_stable = (std::abs(current_roll) < attitude_stability_threshold_ && 
-                              std::abs(current_pitch) < attitude_stability_threshold_);
-      
+                              std::abs(current_pitch) < attitude_stability_threshold_)
+                              && std::abs(omega_current.z()) < attitude_stability_threshold_;
+
       if (attitude_stable) {
           attitude_stable_counter_++;
           if (attitude_stable_counter_ >= attitude_stable_threshold_) {
+
+            if (inhibit_sliding_){
+              ROS_WARN("[%s][ALIGNING]: Attitude stabilized, but sliding is inhibited. Skipping move away phase.", name_.c_str());
+              last_control_output_ = hoveringControlOutput(dt);
+              return;
+            }
             alignment_phase_ = MOVE_AWAY;
             ROS_INFO("[%s][ALIGNING]: Attitude stabilized, moving away from contact point", name_.c_str());
 
@@ -767,7 +766,7 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
             time_limit_safety_position = ros::Time::now();
         }
       } else {
-        attitude_stable_counter_ = 0;
+        attitude_stable_counter_ = std::max(0, attitude_stable_counter_ - 1);
       }
       
       mrs_msgs::HwApiAttitudeCmd attitude_cmd;
@@ -836,18 +835,49 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
 
       // Check if the UAV is moving away from the contact point
 
-      ROS_INFO_THROTTLE(0.05, "[%s][ALIGNING]: Moving away from contact point, s: %.3f", name_.c_str(), s);
+      ROS_INFO_THROTTLE(0.1, "[%s][ALIGNING]: Moving away from contact point, s: %.3f", name_.c_str(), s);
 
-      if (s < max_s && (ros::Time::now() - time_limit_safety_position).toSec() > 3.0) {
+      Eigen::Vector3d pos_error = recovery_position_ - uav_pos_W;
+      pos_error.z() = 0;
 
-        time_limit_safety_position = ros::Time::now();
+      integral_xy += pos_error.head<2>() * dt;
+      const double I_MAX = 1.0, I_MIN = -1.0;
+      integral_xy.x() = std::clamp(integral_xy.x(), I_MIN, I_MAX);
+      integral_xy.y() = std::clamp(integral_xy.y(), I_MIN, I_MAX);
+
+      double e_parallel = rel.dot(direction_to_recovery);
+      double e_perp     = pos_error.head<2>().norm();
+      double w_par      = 1.0, w_per = 2.0;
+      double e_composite= w_par*e_parallel + w_per*e_perp;
+
+      static ros::Time last_time = ros::Time::now();
+      double dt = (ros::Time::now() - last_time).toSec();
+      last_time = ros::Time::now();
+
+      double dot_e = 0;
+      if (dt > 0) {
+        dot_e = (e_composite - last_error) / dt;
+      }
+
+      bool is_approaching = (dot_e < 0.0);
+      approach_window.push_back(is_approaching);
+      if (approach_window.size() > N_win) {
+        approach_window.pop_front();
+      }
+
+      approach_count = std::count(approach_window.begin(), approach_window.end(), true);
+
+      if (approach_window.size() == N_win && approach_count <= (static_cast<int>(N_win) - T_thresh) && s < 0.3) {
+        approach_window.clear();
+        approach_count = 0;
+        integral_xy.setZero();
         
         // If stuck for too long, reset recovery position
         ROS_WARN("[%s][ALIGNING]: Stuck moving away, resetting recovery position", name_.c_str());
         direction_to_contact     = -direction_to_contact;
         direction_to_contact.z() = 0;
         direction_to_contact.normalize();
-        Eigen::Vector3d direction_to_recovery = (recovery_position_ - uav_pos_W).normalized();
+        //Eigen::Vector3d direction_to_recovery = (recovery_position_ - uav_pos_W).normalized();
         recovery_position_       -= direction_to_contact * 2*safety_distance_;
 
         // Publish the new recovery position
@@ -862,20 +892,17 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
         // Change phase
         alignment_phase_ = STABILIZE_ATTITUDE;
         max_s = 0.0;
-      } else if (s >= max_s) {
-        max_s = s;
-        time_limit_safety_position = ros::Time::now();
       }
 
-      Eigen::Vector3d pos_error = recovery_position_ - uav_pos_W;
-      pos_error.z() = 0;
+      last_error = e_composite;
       
       // Create position control command
-      double kp_xy = 2.0; // Position gain
-      double kd_xy = 2.0 * std::sqrt(kp_xy); // Velocity damping
+      double kp_xy = 4.0; // Position gain
+      double kd_xy = std::sqrt(kp_xy); // Velocity damping
+      double ki_xy = 1.0;
       
       // Calculate force in horizontal plane to move away
-      Eigen::Vector2d force_horizontal_xy = kp_xy * pos_error.head<2>() - kd_xy * uav_vel_W.head<2>();
+      Eigen::Vector2d force_horizontal_xy = kp_xy * pos_error.head<2>() - kd_xy * uav_vel_W.head<2>() + ki_xy * integral_xy.head<2>();
       Eigen::Vector3d force_horizontal(force_horizontal_xy.x(), force_horizontal_xy.y(), 0.0);
 
       ROS_INFO_THROTTLE(0.5, "[%s][ALIGNING]: s: %.3f, direction to contact: [%.2f, %.2f, %.2f], rel: [%.2f, %.2f, %.2f]",
@@ -938,7 +965,7 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
 
         rate_feedforward << 0,
                             0,
-                            0;
+                            desired_yaw_rate;
 
       }else if(first_rotation_iteration_) {
         target_yaw = current_yaw;
@@ -1162,7 +1189,6 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
     bool behind_wall_with_margin = uav_pos_W.y() < uav_pos_W.x() * m_wall + q_wall - delta_q && ready_to_sliding_ && mooving ;
 
     bool mooving_forward;
-    bool switch_controller = false;
     if (wall_points.size() > max_wall_points/3 + 10) {
       if (std::abs(m_wall) > 10.0){
         mooving_forward = (m_wall * direction_to_contact.x() + direction_to_contact.y()) > 0.0;
@@ -1254,7 +1280,11 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
 
     }else first_sliding_iteration_= false;
 
-
+    //DEBUG --> TO REMOVE
+    if (wall_yaw_total_weight > 1500.0) {
+      switch_msg.data = true;
+      pub_switch_command_.publish(switch_msg);
+    }
 
     if (ready_to_sliding_ && wall_estimation_weight > 0.8) {
       auto computeQ = [](const Eigen::Vector3d& pos, double m_wall) {
@@ -1431,7 +1461,7 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
     
     // 1. Computes the direction of impedance
     
-    contact_velocity_magnitude = 1.0/(1.0 + std::exp(5 * (std::abs(yaw_error) - 0.349066))); // more than 20 deg
+    contact_velocity_magnitude = admittance_vel_/(1.0 + std::exp(5 * (std::abs(yaw_error) - 0.349066))); // more than 20 deg
     Eigen::Vector3d normal_ref_pos_W_;
 
 
@@ -1480,17 +1510,14 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
                       impedance_vel_error_B_.x(), impedance_vel_error_B_.y(), impedance_vel_error_B_.z());
 
 
-    // 2. Impedance parameters
-
-    double D = 3.0;
-    double K = 5.0;
+    // 2. Impedance parameters -->REMOVE
 
     // 3. Impedance force
 
     double vel_error_normal = impedance_vel_error_W_.dot(wall_normal_inertial_estimate_);
     double pos_error_normal = impedance_pos_error_W_.dot(wall_normal_inertial_estimate_);
 
-    double f_cmd_impedance = K * pos_error_normal + D * vel_error_normal;
+    double f_cmd_impedance = k_admittance_ * pos_error_normal + d_admittance_ * vel_error_normal;
 
     Eigen::Vector3d force_normal = wall_normal_inertial_estimate_ * f_cmd_impedance;
 
@@ -1518,9 +1545,6 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
         }
       }
     }*/
-
-    int closest_idx = -1;
-    double min_dist = std::numeric_limits<double>::max();
 
     if (first_sliding_iteration_ || sliding_direction_ == 0) {
       if (sh_trajectory.hasMsg()) {
@@ -1584,7 +1608,7 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
 
     
 
-    double sliding_velocity_magnitude = std::clamp(sliding_direction_ * 2.5 * yaw_reduction_term * normal_reduction_term,
+    double sliding_velocity_magnitude = std::clamp(sliding_direction_ * sliding_vel_ * yaw_reduction_term * normal_reduction_term,
                                         (R_OrientAdjust.transpose() * uav_vel_B).x() - 2, (R_OrientAdjust.transpose() * uav_vel_B).x() + 2);
     
     double alpha = 0.4;
@@ -1632,7 +1656,7 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
     double vel_error_tangent = tangent_ref_vel_vectorial.dot(sliding_tangent_inertial_cmd_);
 
     // 4.4 Tangent force command
-    double f_cmd_sliding = p_sliding_kp_pos_tangent_ * pos_error_tangent + p_sliding_kd_pos_tangent_ * vel_error_tangent;
+    double f_cmd_sliding = kp_sliding_ * pos_error_tangent + kd_sliding_ * vel_error_tangent;
 
     if (!ready_to_sliding_) {
       f_cmd_sliding = 0.0;
@@ -1680,7 +1704,7 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
 
     double pos_error_z = tracker_command.position.z - uav_pos_W.z();
     double vel_error_z = - uav_vel_W.z();
-    Eigen::Vector3d pd_cmd_z_W (0, 0, p_sliding_kp_pos_z_ * pos_error_z + p_sliding_kd_pos_z_ * vel_error_z);
+    Eigen::Vector3d pd_cmd_z_W (0, 0, kp_pos_z_ * pos_error_z + kd_pos_z_ * vel_error_z);
     Eigen::Vector3d total_force_cmd_W = gravity_comp_W + force_normal + force_cmd_tangent - disturbance_comp_W + pd_cmd_z_W;
     
 
@@ -1977,14 +2001,16 @@ void BumpTolerantController::callbackDrs(DrsConfig_t &config, [[maybe_unused]] u
   gains_.kw_rp = drs_params_.kw_rp; 
   gains_.kw_y = drs_params_.kw_y; 
 
-  p_desired_contact_force_ = drs_params_.p_desired_contact_force;
   p_alignment_max_yaw_rate_ = drs_params_.p_alignment_max_yaw_rate;
 
-  p_sliding_kp_force_ = drs_params_.p_sliding_kp_force;
-  p_sliding_kp_pos_tangent_ = drs_params_.p_sliding_kp_pos_tangent;
-  p_sliding_kd_pos_tangent_ = drs_params_.p_sliding_kd_pos_tangent;
-  p_sliding_kp_pos_z_ = drs_params_.p_sliding_kp_pos_z;
-  p_sliding_kd_pos_z_ = drs_params_.p_sliding_kd_pos_z;
+  kp_sliding_     = drs_params_.kp_sliding;
+  kd_sliding_     = drs_params_.kd_sliding;
+  k_admittance_   = drs_params_.k_admittance;
+  d_admittance_   = drs_params_.d_admittance;
+  kp_pos_z_       = drs_params_.kp_pos_z;
+  kd_pos_z_       = drs_params_.kd_pos_z;
+  sliding_vel_    = drs_params_.sliding_vel;
+  admittance_vel_ = drs_params_.admittance_vel;
 
   ROS_INFO("[%s]: Dynamic reconfigure callback processed. Level %u", name_.c_str(), level);
 }
