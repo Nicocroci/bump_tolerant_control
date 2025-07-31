@@ -47,6 +47,10 @@
 
 #include <visualization_msgs/MarkerArray.h>
 
+#include <fstream>      // per file output
+#include <iomanip>      // per setprecision
+
+
 
 #define OUTPUT_ACTUATORS 0
 #define OUTPUT_CONTROL_GROUP 1
@@ -268,6 +272,8 @@ private:
   // | ------------------- alignment detection ------------------ |
 
   bool         first_alignment_iteration_      = true;
+  bool         first_stabilization_iteration_ = true;
+  bool         changed_recovery_position_ = false;
   int          alignment_yaw_rate_low_counter_ = 0;
   ros::Time    time_limit_safety_position      = ros::Time::now();
   ros::Time    phase_time                      = ros::Time::now();
@@ -367,6 +373,15 @@ private:
 
   Eigen::Vector2d Iw_w_;  
   Eigen::Vector2d Ib_b_;
+
+  // | -------------------------- test -------------------------- |
+  std::string log_file_path = "/home/nicolo/sim_logs/sim_results.txt";
+  ros::Time last_test_time_;
+  double stabilization_time_ = 0.0;
+  double aligning_time = 0.0;
+  double sliding_time_ = 0.0;
+  double sliding_distance_ = 0.0;
+  bool test = true;
   
 };
 
@@ -459,6 +474,7 @@ bool BumpTolerantController::initialize(const ros::NodeHandle& nh, std::shared_p
   // Sliding
   pub_11_                     = nh_.advertise<visualization_msgs::Marker>("reference_frame_marker", 1);
   pub_12_                     = nh_.advertise<geometry_msgs::PointStamped>("pub_12_velocity_error", 1);
+  pub_13_                     = nh_.advertise<std_msgs::Float64>("pub_13_sliding_reference", 1);
 
   // | ------------------------- timers ------------------------- |
 
@@ -742,6 +758,11 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
     // --- PHASE 1: STABILIZE ATTITUDE ---
     if (alignment_phase_ == STABILIZE_ATTITUDE) {
 
+      if (first_stabilization_iteration_) {
+        first_stabilization_iteration_ = false;
+        last_test_time_ = ros::Time::now();
+      }
+
       msg.data = 0.0;
 
       bool attitude_stable = (std::abs(current_roll) < attitude_stability_threshold_ && 
@@ -758,6 +779,10 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
               return;
             }
             alignment_phase_ = MOVE_AWAY;
+            if (!changed_recovery_position_) {
+              stabilization_time_ = (ros::Time::now() - last_test_time_).toSec();
+              last_test_time_ = ros::Time::now();
+            }
             ROS_INFO("[%s][ALIGNING]: Attitude stabilized, moving away from contact point", name_.c_str());
 
             ROS_WARN("[%s][ALIGNING]: Stabilization time: %.2f seconds",
@@ -890,6 +915,7 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
         pub_1_.publish(pos_msg);
 
         // Change phase
+        changed_recovery_position_ = true;
         alignment_phase_ = STABILIZE_ATTITUDE;
         max_s = 0.0;
       }
@@ -1037,6 +1063,8 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
 
           wall_interaction_state_ = SLIDING_SQUARE;
           first_sliding_iteration_ = true;
+          aligning_time = (ros::Time::now() - last_test_time_).toSec();
+          last_test_time_ = ros::Time::now();
 
           ROS_WARN("[%s][ALIGNING]: Alignment time: %.2f seconds",
                       name_.c_str(), (ros::Time::now() - phase_time).toSec());
@@ -1106,6 +1134,7 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
     if (!ready_to_sliding_) {
       msg.data = 5.0;
     } else msg.data = 10.0;
+    
     pub_sliding_phase_.publish(msg);
 
     if (first_sliding_iteration_) {
@@ -1232,9 +1261,29 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
                 point.position.x(), point.position.y(), point.position.z(), point.weight,
                 -point.position.x() * m_wall + point.position.y());
       }
+
+      sliding_time_ = (ros::Time::now() - last_test_time_).toSec();
+      sliding_distance_ = (uav_pos_W - initial_position_).head<2>().norm(); 
+
+      std::ofstream log_file;
+      log_file.open(log_file_path, std::ios_base::app);
+
+      if (log_file.is_open()) {
+        log_file << std::fixed << std::setprecision(3);
+        log_file << "Simulation: "
+                << "stabilization time: " << stabilization_time_ << " [s], "
+                << "alligning time: " << aligning_time << " [s], "
+                << "sliding time: " << sliding_time_ << " [s], "
+                << "distance: " << sliding_distance_ << " [m]" << std::endl;
+        log_file.close();
+      }
+
       pub_switch_command_.publish(switch_msg);
     }else switch_msg.data = false;
+    
     pub_switch_command_.publish(switch_msg);
+
+    
 
     // 0.3) Data collection and wall estimation
 
@@ -1279,12 +1328,6 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
 
 
     }else first_sliding_iteration_= false;
-
-    //DEBUG --> TO REMOVE
-    if (wall_yaw_total_weight > 1500.0) {
-      switch_msg.data = true;
-      pub_switch_command_.publish(switch_msg);
-    }
 
     if (ready_to_sliding_ && wall_estimation_weight > 0.8) {
       auto computeQ = [](const Eigen::Vector3d& pos, double m_wall) {
@@ -1603,7 +1646,7 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
                     (last_position - left_point).head<2>().norm());
           }
         }
-      }else sliding_direction_ = 1;
+      }else sliding_direction_ = -1;
     }
 
     
@@ -1630,7 +1673,10 @@ void BumpTolerantController::BTC(const mrs_msgs::UavState &uav_state,
       sliding_velocity_magnitude = 0.0;
     }
 
-    
+    std_msgs::Float64 sliding_velocity_msg;
+    sliding_velocity_msg.data = sliding_velocity_magnitude;
+    pub_13_.publish(sliding_velocity_msg);
+
     }
 
     ROS_INFO_THROTTLE(0.1, "[%s][SLIDING_SQUARE]: sliding velocity real: %.3f,desired y velocity:%.3f desired x velocity: %.3f",

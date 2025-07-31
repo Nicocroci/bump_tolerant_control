@@ -29,15 +29,27 @@ param_sets_1 = [
 ]
 
 param_sets = [
-    { "angle": -3.14},
-    { "angle": -2.356194490192345 },
-    { "angle": -1.5707963267948966 },
-    { "angle": -0.7853981633974483 },
-    { "angle": 0.0 },
-    { "angle": 0.7853981633974483 },#fatte
-    { "angle": 1.5707963267948966 },#da fare
-    { "angle": 2.356194490192345 },
-    { "angle": 3.14 }
+    { "sliding_vel": 2.0, "admittance_vel": 1.0 },
+    { "sliding_vel": 2.0, "admittance_vel": 1.5 },
+    { "sliding_vel": 2.0, "admittance_vel": 2.0 },
+    { "sliding_vel": 2.5, "admittance_vel": 1.0 },
+    { "sliding_vel": 2.5, "admittance_vel": 1.5 },
+    { "sliding_vel": 2.5, "admittance_vel": 2.0 },
+    { "sliding_vel": 3.0, "admittance_vel": 1.0 },
+    { "sliding_vel": 3.0, "admittance_vel": 1.5 },
+    { "sliding_vel": 3.0, "admittance_vel": 2.0 },
+    { "sliding_vel": 3.5, "admittance_vel": 1.0 },#Fino a qui fatto
+    { "sliding_vel": 3.5, "admittance_vel": 1.5 },
+    { "sliding_vel": 3.5, "admittance_vel": 2.0 },
+    { "sliding_vel": 4.0, "admittance_vel": 1.0 },
+    { "sliding_vel": 4.0, "admittance_vel": 1.5 },
+    { "sliding_vel": 4.0, "admittance_vel": 2.0 },
+    { "sliding_vel": 4.5, "admittance_vel": 1.0 },
+    { "sliding_vel": 4.5, "admittance_vel": 1.5 },
+    { "sliding_vel": 4.5, "admittance_vel": 2.0 },
+    { "sliding_vel": 5.0, "admittance_vel": 1.0 },
+    { "sliding_vel": 5.0, "admittance_vel": 1.5 },
+    { "sliding_vel": 5.0, "admittance_vel": 2.0 }
 ]
 
 param_sets_test = [
@@ -198,7 +210,8 @@ if __name__ == "__main__":
     for i, params in enumerate(param_sets):
         equal_sim = 3
         for j in range (equal_sim):
-            print(f"\n========== Simulazione {i+1}.{j+1}/{len(param_sets) * equal_sim} ==========")
+            print(f"\n========== Simulazione {i * equal_sim + j + 1}/{len(param_sets) * equal_sim} ==========")
+            print(f"\n================ Simulazione {i+1}.{j+1}/{len(param_sets)}.{equal_sim} ================")
 
             start_problem = True
 
@@ -221,29 +234,32 @@ if __name__ == "__main__":
                 f"/{UAV_NAME}/external_wrench_estimator/force_components_filt",
                 f"/{UAV_NAME}/control_manager/bump_tolerant_controller/pub_3_normal_velocity_actual",
                 f"/{UAV_NAME}/control_manager/bump_tolerant_controller/pub_5_desired_attitude",
-                f"/{UAV_NAME}/control_manager/bump_tolerant_controller/pub_6_actual_attitude"
+                f"/{UAV_NAME}/control_manager/bump_tolerant_controller/pub_6_actual_attitude",
+                f"/{UAV_NAME}/control_manager/bump_tolerant_controller/pub_13_sliding_reference",
+                f"/{UAV_NAME}/control_manager/bump_tolerant_controller/sliding_phase",
             ], bag_name=bag_name)
 
             # 2) Ora che il Master è up, inizializza il nodo (solo la PRIMA volta)
             if not rospy.core.is_initialized():  
                 rospy.init_node("sim_runner_" + UAV_NAME, anonymous=True)
+            
+            # 3) Configuro i parametri
+            configure_controller(params)
 
-            #configure_controller(params)
+            # 4) Chiamata goto
+            call_goto()
 
-            # 3) Chiamata goto
-            call_goto_variable_position(angle=params["angle"])
-
-            # 4) Aspetto il messaggio di disattivazione
+            # 5) Aspetto il messaggio di disattivazione
             success = wait_for_controller_to_turn_off()
 
             if success:
                 print("✅ Simulazione completata con successo.")
                 counter += 1
-                print(f"🏆 Simulazioni completate: {counter}/{len(param_sets)}")
+                print(f"🏆 Simulazioni completate: {counter}/{i * equal_sim + j + 1}")
             else:
                 print("⚠️ Timeout o fallimento nella simulazione.")
 
-            # 5) Chiudo la simulazione
+            # 6) Chiudo la simulazione
             stop_rosbag()
             time.sleep(2)
             kill_simulation()
